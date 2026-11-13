@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>登入 · {{title}}</title>
+<link rel="icon" href="/ui/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/static/app.css?v={{v}}">
+<script src="/ui/static/common.js?v={{v}}" defer></script>
+<script src="/ui/static/login.js?v={{v}}" defer></script>
+</head>
+<body class="page-center">
+<main class="card narrow login-card">
+  <div class="brand"><img src="/ui/static/favicon.svg" alt=""><span>{{title}}</span></div>
+  <h1>登入 (Sign in)</h1>
+  <form id="login-form" method="post" novalidate>
+    <div class="field">
+      <label for="username">帳號 (username)</label>
+      <input id="username" name="username" type="text" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">密碼 (password)</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button id="login-btn" class="btn primary block" type="submit">登入</button>
+    <p id="login-error" class="form-error" role="alert" aria-live="assertive"></p>
+  </form>
+  <p class="login-foot small muted">沒有帳號？請向管理員申請。<br>No account? Ask the administrator.</p>
+</main>
+</body>
+</html>

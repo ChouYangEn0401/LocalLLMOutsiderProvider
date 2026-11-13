@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>管理 · {{title}}</title>
+<link rel="icon" href="/ui/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/static/app.css?v={{v}}">
+<script src="/ui/static/common.js?v={{v}}" defer></script>
+<script src="/ui/static/admin.js?v={{v}}" defer></script>
+</head>
+<body>
+<header class="topbar"><div class="topbar-inner" id="topbar"></div></header>
+
+<main class="container">
+  <div id="alerts"></div>
+
+  <section class="section" aria-labelledby="h-server">
+    <div class="section-head">
+      <h2 id="h-server">公開網址與服務狀態 (Public URL &amp; status)</h2>
+      <span class="small muted"><span id="updated"></span>
+        <button class="btn small ghost" id="refresh" type="button">重新整理</button></span>
+    </div>
+    <div class="grid two">
+      <div class="card" id="public-card"><p class="muted">載入中…</p></div>
+      <div class="card" id="server-card"></div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="h-backends">
+    <div class="section-head"><h2 id="h-backends">後端 (Backends)</h2></div>
+    <div class="card flush"><div class="table-wrap" id="backends"></div></div>
+  </section>
+
+  <section class="section" aria-labelledby="h-users">
+    <div class="section-head">
+      <h2 id="h-users">使用者用量 (Users)</h2>
+      <p class="small muted">帳號與額度在 config.yaml 管理，存檔後自動生效。</p>
+    </div>
+    <div class="card flush"><div class="table-wrap" id="users"></div></div>
+    <p class="small muted hidden" id="orphans"></p>
+  </section>
+
+  <section class="section" aria-labelledby="h-keys">
+    <div class="section-head">
+      <h2 id="h-keys">所有 API 金鑰 (All API keys)</h2>
+      <p class="small muted" id="keys-count"></p>
+    </div>
+    <div class="card flush"><div class="table-wrap" id="keys"></div></div>
+  </section>
+
+  <section class="section" aria-labelledby="h-recent">
+    <div class="section-head">
+      <h2 id="h-recent">最近請求（全部）(Recent requests)</h2>
+      <p class="small muted">最近 100 筆</p>
+    </div>
+    <div class="card flush"><div class="table-wrap" id="recent"></div></div>
+  </section>
+</main>
+</body>
+</html>
