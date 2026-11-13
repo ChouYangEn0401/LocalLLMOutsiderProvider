@@ -15,7 +15,7 @@ server:
 
 # Local LLM servers behind the gateway. type: ollama | vllm | lmstudio | llamacpp | openai
 # All are reached through their OpenAI-compatible /v1 API; Ollama also gets
-# native extras (context_size -> num_ctx, model listing from /api/tags).
+# native extras (model listing from /api/tags, context length from /api/show).
 backends:
   - name: ollama
     type: ollama
@@ -23,7 +23,10 @@ backends:
     models: ["*"]                      # expose all models, or list e.g. ["qwen3.5:9b"]
     max_concurrency: 2                 # requests sent to this server at once (protect the GPU)
     timeout: 600                       # seconds without progress before giving up
-    context_size: 8192                 # Ollama only: num_ctx (default 4096 silently truncates!)
+    # Ollama's default context is small (4096 on many builds) and it SILENTLY drops
+    # the start of long prompts. Ollama's /v1 API ignores per-request num_ctx, so set
+    # it on the Ollama side: env OLLAMA_CONTEXT_LENGTH=8192 (or Modelfile num_ctx).
+    context_size: 0                    # sent as options.num_ctx (best effort; see above)
   # - name: vllm
   #   type: vllm
   #   base_url: http://127.0.0.1:8000
@@ -43,7 +46,8 @@ default_quota:
   max_concurrent: 2
   max_tokens_per_request: 4096
 
-# Accounts. Create a password hash with:   llmop hash-password
+# Accounts. max_api_keys: 0 = this account cannot create API keys (web playground only).
+# Create a password hash with:   llmop hash-password
 # (or: python -m llmop hash-password)
 accounts:
   admin:

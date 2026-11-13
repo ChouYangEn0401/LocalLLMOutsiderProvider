@@ -68,6 +68,7 @@ class FakeModel:
     backend: str = "fake"
     owned_by: str = "fake"
     context_length: int | None = 8192
+    created: int | None = None
 
 
 class FakeRouter:
@@ -482,7 +483,7 @@ def test_models_all_for_star(client):
     login_csrf(client, "bob")
     data = client.get("/ui/api/models").json()["data"]
     assert [m["id"] for m in data] == ["llama3.1:8b", "qwen3:8b", "mistral:7b"]
-    assert data[0] == {"id": "llama3.1:8b", "backend": "fake", "owned_by": "fake",
+    assert data[0] == {"id": "llama3.1:8b", "owned_by": "fake",
                        "context_length": 8192}
 
 

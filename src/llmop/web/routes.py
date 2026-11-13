@@ -660,20 +660,21 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
     async def api_models(request: Request):
         user = require_user(request)
         acc = user.account
+        # Same list as GET /v1/models (dedup, aliases, backend/model permissions).
+        from llmop.api import visible_models
+
         try:
-            models = await state.router.list_models()
+            objs = await visible_models(state, acc)
         except Exception as exc:
             log.warning("list_models failed: %s", exc)
             return JSONResponse({"data": [], "error": f"無法取得模型列表 (model list failed): {exc}"})
         data = [
             {
-                "id": m.id,
-                "backend": getattr(m, "backend", ""),
-                "owned_by": getattr(m, "owned_by", ""),
-                "context_length": getattr(m, "context_length", None),
+                "id": o["id"],
+                "owned_by": o.get("owned_by", ""),
+                "context_length": o.get("context_length"),
             }
-            for m in models
-            if acc.may_use_model(m.id)
+            for o in objs
         ]
         return JSONResponse({"data": data, "error": None})
 
