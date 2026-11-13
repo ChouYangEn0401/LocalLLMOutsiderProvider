@@ -47,22 +47,8 @@ jobs:
           print("wheel ok:", len(names), "files")
           EOF
 
-      - name: Windows bundle (wheel + double-click scripts)
-        run: |
-          python - <<'EOF'
-          import glob, os, shutil
-          version = os.environ["VERSION"]
-          root = f"bundle/llmop-{version}"
-          os.makedirs(f"{root}/dist")
-          shutil.copytree("scripts/windows", f"{root}/scripts/windows")
-          for f in glob.glob("dist/*.whl"):
-              shutil.copy(f, f"{root}/dist/")
-          for f in ("config.example.yaml", "README.md"):
-              if os.path.exists(f):
-                  shutil.copy(f, root)
-          shutil.make_archive(f"dist/llmop-windows-{version}", "zip", "bundle", f"llmop-{version}")
-          EOF
-          ls -l dist
+      - name: Windows portable zip (Python included, unzip and double-click)
+        run: python scripts/build_portable.py && ls -l dist
 
       - name: GitHub Release
         uses: softprops/action-gh-release@v2

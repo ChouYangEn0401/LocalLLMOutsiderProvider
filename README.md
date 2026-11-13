@@ -12,17 +12,33 @@ Expose local LLM services to online users with lightweight session-based authent
                                                           └ /ui/*  網頁（登入、用量、申請 key）
 ```
 
-## 5 分鐘上手（Windows）
+## 架設端 vs 應用端（先搞懂這個）
+
+| | 架設端（你） | 應用端（朋友、你的其他裝置） |
+|---|---|---|
+| 要裝什麼 | 本專案（whl 或 git clone）+ cloudflared + Ollama | **什麼都不用裝**，用現成的 OpenAI SDK / curl / Open WebUI |
+| 拿到什麼 | 公開網址 | 網址 + `sk-llop-...` API key（登入網頁自己申請） |
+
+**whl 是架設端的安裝檔**，不是給使用者的。應用端因為 API 跟 OpenAI 相容，所以不需要任何我們的套件。完整說明、安裝方式比較和交接事項見 [docs/HANDOFF.md](docs/HANDOFF.md)。
+
+## 5 分鐘上手（Windows，免安裝版）
+
+不需要先裝 Python。
 
 1. 先準備好 Ollama，並拉一個模型：`ollama pull qwen3.5:9b`
-2. 安裝 cloudflared（要對外分享時才需要）：`winget install --id Cloudflare.cloudflared`
-3. 在專案資料夾雙擊 `scripts\windows\Setup.bat`
-   - 它會建立 `.venv`、安裝套件，並執行 `llmop init`
-   - `init` 會建立 `config.yaml`，並請你設定 admin 密碼
-4. 雙擊 `scripts\windows\Start-With-Tunnel.bat`。只在本機測試的話，用 `Start.bat`。
-5. 打開畫面上印出的網址 → 登入 → 在「API 金鑰」申請一把 key（**只會顯示一次**）
+2. 從 GitHub Release 下載 `llmop-<版本>-windows-x64-portable.zip`，解壓縮到任意資料夾。
+3. 雙擊 `Start-With-Tunnel.bat`。只在本機測試的話，用 `Start.bat`。
+   - 第一次啟動會請你設定 admin 密碼，並建立 `config.yaml`。
+   - 沒有 cloudflared 的話，它會問要不要用 winget 幫你裝。
+4. 瀏覽器會自動打開。登入後在「API 金鑰」申請一把 key（**只會顯示一次**）。
+5. 把畫面上的 `https://xxx.trycloudflare.com` 和 key 給朋友。朋友那邊不用裝任何東西。
 
-用 whl 安裝也可以：
+新增朋友帳號：雙擊 `Add-User.bat`。
+
+### 其他安裝方式
+
+- **開發者**：`git clone` 之後雙擊 `scripts\windows\Setup.bat`，然後用 `scripts\windows\Start-With-Tunnel.bat` 啟動。
+- **已經有 Python**：
 
 ```bash
 pip install localllm_outsider_provider-0.1.0-py3-none-any.whl
@@ -35,6 +51,10 @@ llmop init
 ```bash
 llmop serve --tunnel
 ```
+
+- **Docker**：見 [`docker/README.md`](docker/README.md)。
+
+為什麼有 whl 又有 zip？whl 是 Python 的「零件」，需要電腦上已有 Python。zip 是把零件連同 Python 一起包好的「成品」。兩者裝的都是架設端，詳見 [docs/HANDOFF.md](docs/HANDOFF.md)。
 
 ## 呼叫 API
 

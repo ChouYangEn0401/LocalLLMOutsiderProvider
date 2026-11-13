@@ -114,12 +114,26 @@ footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line)
 </header>
 
 <section>
+  <h2>架設端和應用端</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>架設端（你）</th><th>應用端（朋友、你的其他裝置）</th></tr></thead>
+      <tbody>
+        <tr><td>要裝什麼</td><td>llmop（這頁的五種方式之一）、cloudflared、Ollama</td><td><strong>什麼都不用裝</strong>，用現成的 OpenAI SDK、curl、Open WebUI、Cline</td></tr>
+        <tr><td>拿到什麼</td><td>公開網址</td><td>網址 + <code>sk-llop-…</code> API key（登入網頁自己申請）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small">whl 和免安裝版 zip 都是架設端的安裝檔。whl 是 Python 的「零件」，要先有 Python；zip 把零件連同 Python 一起包好，解壓縮就能用。API 跟 OpenAI 相容，所以應用端不需要我們的任何套件。</p>
+</section>
+
+<section>
   <h2>先選一種</h2>
   <div class="table-wrap">
     <table>
       <thead><tr><th>方式</th><th>Docker 裡跑什麼</th><th>適合誰</th><th>需要</th></tr></thead>
       <tbody>
-        <tr><td><a href="#setup-a">A · Windows 直接跑</a> <span class="pill rec">推薦</span></td><td>不用 Docker</td><td>Ollama 已經裝在 Windows 上，想最快開始</td><td>Python 3.10+、cloudflared</td></tr>
+        <tr><td><a href="#setup-a">A · Windows 免安裝版</a> <span class="pill rec">推薦</span></td><td>不用 Docker</td><td>Ollama 已經裝在 Windows 上，想最快開始</td><td>只要解壓縮（內含 Python）、cloudflared</td></tr>
         <tr><td><a href="#setup-b">B · Docker 接主機 Ollama</a></td><td>只有 llmop</td><td>想把閘道關在容器裡，Ollama 照舊</td><td>Docker Desktop</td></tr>
         <tr><td><a href="#setup-c">C · llmop + Ollama</a></td><td>llmop、Ollama</td><td>全部放進容器，一行指令開關</td><td>Docker Desktop（GPU 可選）</td></tr>
         <tr><td><a href="#setup-d">D · llmop + vLLM</a> <span class="pill gpu">需 NVIDIA GPU</span></td><td>llmop、vLLM</td><td>要高併發、HuggingFace 模型</td><td>Docker Desktop + WSL 2 + NVIDIA 驅動</td></tr>
@@ -180,20 +194,17 @@ footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line)
 </section>
 
 <section class="setup" id="setup-a">
-  <div class="setup-head"><span class="tag">A</span><h3>Windows 直接跑（不用 Docker）</h3><span class="pill rec">推薦</span></div>
+  <div class="setup-head"><span class="tag">A</span><h3>Windows 免安裝版（不用 Docker，不用先裝 Python）</h3><span class="pill rec">推薦</span></div>
   <p>Ollama 照你平常的方式裝在 Windows 上。llmop 跑在旁邊，同一台電腦用 127.0.0.1 互連，最單純。</p>
   <ol class="steps">
-    <li><span>安裝 cloudflared（一次就好）：</span>
+    <li><span>從 GitHub Release 下載 <code>llmop-0.1.0-windows-x64-portable.zip</code>，解壓縮到任意資料夾。</span></li>
+    <li><span>雙擊 <code>Start-With-Tunnel.bat</code>（只在本機測試用 <code>Start.bat</code>）。第一次會請你設定 admin 密碼；沒有 cloudflared 的話，它會問要不要幫你裝，也可以自己裝：</span>
       <div class="cmd"><pre>winget install --id Cloudflare.cloudflared</pre><button type="button">複製</button></div></li>
-    <li><span>用 GitHub Release 下載的 whl 安裝（或在專案資料夾雙擊 <code>scripts\windows\Setup.bat</code>，它會建 .venv、裝套件、執行 init）：</span>
-      <div class="cmd"><pre>pip install localllm_outsider_provider-0.1.0-py3-none-any.whl</pre><button type="button">複製</button></div></li>
-    <li><span>建立 <code>config.yaml</code> 並設定 admin 密碼：</span>
-      <div class="cmd"><pre>llmop init</pre><button type="button">複製</button></div></li>
-    <li><span>啟動並開 tunnel，畫面會印出 https://….trycloudflare.com：</span>
-      <div class="cmd"><pre>llmop serve --tunnel</pre><button type="button">複製</button></div></li>
-    <li><span>打開那個網址，登入，在「API 金鑰」申請一把 key（只會顯示一次）。新增朋友帳號：</span>
-      <div class="cmd"><pre>llmop add-user friend1</pre><button type="button">複製</button></div></li>
+    <li><span>瀏覽器會自動打開，畫面上也會印出 https://….trycloudflare.com。登入後在「API 金鑰」申請一把 key（只會顯示一次）。</span></li>
+    <li><span>新增朋友帳號：雙擊 <code>Add-User.bat</code>。其他指令可以在 <code>Command-Prompt.bat</code> 開的視窗裡打，例如：</span>
+      <div class="cmd"><pre>llmop usage</pre><button type="button">複製</button></div></li>
   </ol>
+  <p class="small">已經有 Python 的話，也可以改用 whl：<code>pip install localllm_outsider_provider-0.1.0-py3-none-any.whl</code>，然後 <code>llmop init</code>、<code>llmop serve --tunnel</code>。</p>
   <p class="note">Ollama 預設 context 很小，超過時會悄悄截掉前面的內容。建議在 Windows 的環境變數加上 <code>OLLAMA_CONTEXT_LENGTH=8192</code>，然後重開 Ollama。</p>
 </section>
 
