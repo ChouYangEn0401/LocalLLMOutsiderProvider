@@ -1,0 +1,9 @@
+# Whitelist: send Docker only what the image build needs (docker/Dockerfile).
+# Everything else - .venv, data/, config.yaml with password hashes, .git - stays out.
+*
+!pyproject.toml
+!README.md
+!src
+**/__pycache__
+**/*.pyc
+**/*.egg-info

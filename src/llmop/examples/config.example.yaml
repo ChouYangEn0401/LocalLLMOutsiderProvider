@@ -1,0 +1,75 @@
+# LocalLLMOutsiderProvider (llmop) - example config
+# Copy to config.yaml and edit:   copy config.example.yaml config.yaml   (Windows)
+# The file is re-read automatically when it changes; no restart needed for
+# accounts / quotas / backends.
+# config.yaml is in .gitignore - never commit real password hashes.
+
+server:
+  host: 127.0.0.1          # keep 127.0.0.1; the tunnel connects locally. Docker sets 0.0.0.0.
+  port: 8780
+  data_dir: ./data         # SQLite file (keys, sessions, usage records) lives here
+  public_url: ""           # fixed public URL (named tunnel / own domain). Empty = use quick tunnel URL
+  session_minutes: 720     # web login lasts 12 hours
+  cookie_secure: auto      # auto | always | never
+  title: "Local LLM Outsider Provider"
+
+# Local LLM servers behind the gateway. type: ollama | vllm | lmstudio | llamacpp | openai
+# All are reached through their OpenAI-compatible /v1 API; Ollama also gets
+# native extras (model listing from /api/tags, context length from /api/show).
+backends:
+  - name: ollama
+    type: ollama
+    base_url: http://127.0.0.1:11434   # in Docker compose: http://ollama:11434
+    models: ["*"]                      # expose all models, or list e.g. ["qwen3.5:9b"]
+    max_concurrency: 2                 # requests sent to this server at once (protect the GPU)
+    timeout: 600                       # seconds without progress before giving up
+    # Ollama's default context is small (4096 on many builds) and it SILENTLY drops
+    # the start of long prompts. Ollama's /v1 API ignores per-request num_ctx, so set
+    # it on the Ollama side: env OLLAMA_CONTEXT_LENGTH=8192 (or Modelfile num_ctx).
+    context_size: 0                    # sent as options.num_ctx (best effort; see above)
+  # - name: vllm
+  #   type: vllm
+  #   base_url: http://127.0.0.1:8000
+  #   api_key: env:VLLM_API_KEY        # if vLLM was started with --api-key
+  #   models: ["*"]
+
+# Optional friendly names:  "model": "fast"  ->  qwen3.5:9b
+model_aliases:
+  # fast: qwen3.5:9b
+
+# Applied to every account unless the account overrides a value. 0 = unlimited.
+default_quota:
+  tokens_per_day: 200000
+  tokens_per_month: 3000000
+  requests_per_minute: 20
+  requests_per_day: 0
+  max_concurrent: 2
+  max_tokens_per_request: 4096
+
+# Accounts. max_api_keys: 0 = this account cannot create API keys (web playground only).
+# Create a password hash with:   llmop hash-password
+# (or: python -m llmop hash-password)
+accounts:
+  admin:
+    role: admin
+    display_name: Owner
+    password_hash: "REPLACE_ME_run_llmop_hash-password"
+    quota:
+      tokens_per_day: 0        # unlimited for the owner
+      tokens_per_month: 0
+  # friend1:
+  #   role: user
+  #   display_name: Friend
+  #   password_hash: "scrypt$32768$8$1$...."
+  #   models: ["qwen3.5:9b"]   # which models this account may use ("*" = all)
+  #   max_api_keys: 3
+  #   quota:
+  #     tokens_per_day: 50000
+
+# Cloudflare tunnel (needs cloudflared: winget install --id Cloudflare.cloudflared)
+tunnel:
+  enabled: false
+  mode: quick              # quick = random https://xxx.trycloudflare.com (changes every start)
+                           # named = your own domain, stable URL (needs token)
+  cloudflared: cloudflared # path to cloudflared(.exe) if not on PATH
+  token: ""                # mode: named -> env:CLOUDFLARE_TUNNEL_TOKEN

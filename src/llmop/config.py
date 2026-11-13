@@ -58,7 +58,10 @@ class Quota:
         for key, val in (data or {}).items():
             if key not in cls.__dataclass_fields__:
                 raise ConfigError(f"unknown quota key: {key!r}")
-            merged[key] = int(val or 0)
+            try:
+                merged[key] = int(val or 0)
+            except (TypeError, ValueError):
+                raise ConfigError(f"quota {key} must be a number, got {val!r}") from None
         return cls(**merged)
 
 
@@ -194,6 +197,15 @@ def parse_config(raw: dict | None, path: Path | None = None) -> Config:
     if unknown:
         raise ConfigError(f"unknown server keys: {sorted(unknown)}")
     server = ServerSettings(**srv_raw)
+    try:
+        server.port = int(server.port)
+        server.session_minutes = int(server.session_minutes)
+        server.sse_keepalive = float(server.sse_keepalive)
+    except (TypeError, ValueError):
+        raise ConfigError("server.port / session_minutes / sse_keepalive must be numbers") from None
+    # Docker / scripts may override where data lives without editing the file.
+    if os.environ.get("LLMOP_DATA_DIR"):
+        server.data_dir = os.environ["LLMOP_DATA_DIR"]
     if server.cookie_secure not in ("auto", "always", "never"):
         raise ConfigError("server.cookie_secure must be auto | always | never")
 
@@ -306,7 +318,7 @@ class ConfigHolder:
                     try:
                         self._config = load_config(self._config.path)
                         self.last_error = None
-                    except (ConfigError, yaml.YAMLError, OSError, TypeError) as exc:
+                    except (ConfigError, yaml.YAMLError, OSError, TypeError, ValueError) as exc:
                         self.last_error = str(exc)
         return self._config
 

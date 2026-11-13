@@ -1,0 +1,63 @@
+# llmop + Ollama, both in Docker.
+#
+# Use this when Ollama is NOT installed on Windows (otherwise use
+# compose.host-ollama.yml - two Ollamas would fight over the GPU).
+#
+# Run every command inside this "docker" folder. First time:
+#   1. copy config.docker.example.yaml config\config.yaml      (Linux: cp ... config/config.yaml)
+#   2. docker compose -f compose.ollama.yml run --rm --no-deps llmop hash-password
+#      -> paste the printed hash into config\config.yaml as the admin password_hash
+#   3. docker compose -f compose.ollama.yml up -d --build
+#   4. download a model into the Ollama container (once):
+#      docker compose -f compose.ollama.yml exec ollama ollama pull qwen3.5:9b
+#   5. open http://127.0.0.1:8780 and log in as admin
+# Every day:
+#   docker compose -f compose.ollama.yml up -d       start (also after a reboot: restart policy)
+#   docker compose -f compose.ollama.yml logs -f     watch the logs (Ctrl+C stops watching only)
+#   docker compose -f compose.ollama.yml down        stop (keys, usage and models are kept)
+# Public https address: add  -f compose.tunnel.yml  to every command (see that file).
+
+name: llmop
+
+services:
+  llmop:
+    build:
+      context: ..                  # the repository root
+      dockerfile: docker/Dockerfile
+    image: llmop:local
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 = only this computer can open it. The internet reaches llmop
+      # through the Cloudflare tunnel, never through an open port.
+      - "127.0.0.1:8780:8780"
+    volumes:
+      - ./config:/config:ro        # docker/config/config.yaml (edit it on Windows; auto-reload)
+      - llmop-data:/data           # database: API keys, sessions, usage
+    environment:
+      TZ: ${TZ:-UTC}               # daily quotas reset at midnight here, e.g. TZ=Asia/Taipei in docker/.env
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    # No "ports:" on purpose: Ollama has no password, so only llmop (inside the
+    # Docker network, as http://ollama:11434) may talk to it.
+    volumes:
+      - ollama-models:/root/.ollama   # downloaded models survive "down" and upgrades
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m          # keep the model in (GPU) memory for 30 minutes
+    # NVIDIA GPU (strongly recommended; without it the CPU is used and it is slow).
+    # Windows: Docker Desktop with the WSL 2 backend + a current NVIDIA driver is all
+    # you need. Linux: install the NVIDIA Container Toolkit. Then remove the "#"s:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  llmop-data:
+  ollama-models:

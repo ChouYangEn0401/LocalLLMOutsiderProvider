@@ -1,0 +1,72 @@
+name: Release
+
+# Push a tag like v0.1.0 (it must match llmop.__version__) to build the wheel and
+# sdist, run the tests and publish a GitHub Release with the files attached.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the release and upload the files
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Tag must match the package version
+        run: |
+          version="$(python -c 'import llmop; print(llmop.__version__)')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match llmop.__version__ ${version}"
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check the wheel contents
+        run: |
+          python - <<'EOF'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for needed in ("llmop/cli.py", "llmop/examples/config.example.yaml"):
+              assert needed in names, f"{needed} missing from the wheel"
+          print("wheel ok:", len(names), "files")
+          EOF
+
+      - name: Windows bundle (wheel + double-click scripts)
+        run: |
+          python - <<'EOF'
+          import glob, os, shutil
+          version = os.environ["VERSION"]
+          root = f"bundle/llmop-{version}"
+          os.makedirs(f"{root}/dist")
+          shutil.copytree("scripts/windows", f"{root}/scripts/windows")
+          for f in glob.glob("dist/*.whl"):
+              shutil.copy(f, f"{root}/dist/")
+          for f in ("config.example.yaml", "README.md"):
+              if os.path.exists(f):
+                  shutil.copy(f, root)
+          shutil.make_archive(f"dist/llmop-windows-{version}", "zip", "bundle", f"llmop-{version}")
+          EOF
+          ls -l dist
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

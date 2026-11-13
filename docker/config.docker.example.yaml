@@ -1,0 +1,84 @@
+# llmop config for Docker.
+# Copy it to docker/config/config.yaml (the compose files mount docker/config as /config):
+#   Windows:  copy config.docker.example.yaml config\config.yaml
+#   Linux:    cp config.docker.example.yaml config/config.yaml
+# Then set the admin password hash (see docker/README.md). The file is re-read
+# automatically when it changes; no restart needed for accounts / quotas / backends.
+
+server:
+  host: 0.0.0.0            # inside the container. Compose publishes it on 127.0.0.1 only.
+  port: 8780               # the container always listens on 8780; change the LEFT side
+                           # of "ports:" in the compose file to use another host port
+  data_dir: /data          # the Docker volume "llmop-data" (LLMOP_DATA_DIR forces it too)
+  public_url: ""           # with compose.tunnel.yml: paste the https://....trycloudflare.com
+                           # address here so the web page shows it (or your own domain)
+  session_minutes: 720     # web login lasts 12 hours
+  cookie_secure: auto      # auto | always | never
+  title: "Local LLM Outsider Provider"
+  # cloudflared runs in another container, so requests arrive from the Docker network.
+  # Trust its X-Forwarded-For / CF-Connecting-IP headers (real visitor IPs, https).
+  trusted_proxies: ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+# Pick the backend that matches your compose file (only one is needed):
+backends:
+  # compose.ollama.yml: Ollama runs in its own container named "ollama"
+  - name: ollama
+    type: ollama
+    base_url: http://ollama:11434
+    models: ["*"]                      # expose all models, or list e.g. ["qwen3.5:9b"]
+    max_concurrency: 2                 # requests sent to this server at once (protect the GPU)
+    timeout: 600                       # seconds without progress before giving up
+    context_size: 8192                 # Ollama only: num_ctx (default 4096 silently truncates!)
+
+  # compose.host-ollama.yml: Ollama installed normally on Windows (outside Docker)
+  # - name: ollama
+  #   type: ollama
+  #   base_url: http://host.docker.internal:11434
+  #   models: ["*"]
+  #   max_concurrency: 2
+  #   context_size: 8192
+
+  # compose.vllm.yml: vLLM in its own container named "vllm"
+  # - name: vllm
+  #   type: vllm
+  #   base_url: http://vllm:8000
+  #   api_key: env:VLLM_API_KEY        # same value as VLLM_API_KEY in docker/.env (optional)
+  #   models: ["*"]
+  #   max_concurrency: 8
+
+# Optional friendly names:  "model": "fast"  ->  qwen3.5:9b
+model_aliases:
+  # fast: qwen3.5:9b
+
+# Applied to every account unless the account overrides a value. 0 = unlimited.
+default_quota:
+  tokens_per_day: 200000
+  tokens_per_month: 3000000
+  requests_per_minute: 20
+  requests_per_day: 0
+  max_concurrent: 2
+  max_tokens_per_request: 4096
+
+# Accounts. Make a password hash with:
+#   docker compose -f compose.ollama.yml run --rm --no-deps llmop hash-password
+accounts:
+  admin:
+    role: admin
+    display_name: Owner
+    password_hash: "REPLACE_ME_run_llmop_hash-password"
+    quota:
+      tokens_per_day: 0        # unlimited for the owner
+      tokens_per_month: 0
+  # friend1:
+  #   role: user
+  #   display_name: Friend
+  #   password_hash: "scrypt$32768$8$1$...."
+  #   models: ["qwen3.5:9b"]
+  #   quota:
+  #     tokens_per_day: 50000
+
+# In Docker the tunnel runs in its own "cloudflared" container (compose.tunnel.yml),
+# not inside llmop, so keep this disabled here.
+tunnel:
+  enabled: false
+  mode: quick

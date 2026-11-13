@@ -1,0 +1,37 @@
+# Only llmop in Docker; Ollama is installed normally on Windows (the usual case).
+#
+# llmop reaches it as http://host.docker.internal:11434 (Docker Desktop provides
+# that name; the extra_hosts line below makes it work on Linux too). On Linux,
+# Ollama must then listen on the Docker bridge as well (OLLAMA_HOST=0.0.0.0) -
+# make sure your firewall blocks port 11434 from other computers.
+#
+# Run every command inside this "docker" folder. First time:
+#   1. copy config.docker.example.yaml config\config.yaml      (Linux: cp ... config/config.yaml)
+#      and in config\config.yaml use the base_url http://host.docker.internal:11434
+#   2. docker compose -f compose.host-ollama.yml run --rm llmop hash-password
+#      -> paste the printed hash into config\config.yaml as the admin password_hash
+#   3. docker compose -f compose.host-ollama.yml up -d --build
+#   4. open http://127.0.0.1:8780
+# Public https address: add  -f compose.tunnel.yml  to every command.
+
+name: llmop
+
+services:
+  llmop:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: llmop:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8780:8780"      # only this computer; the internet comes in via the tunnel
+    volumes:
+      - ./config:/config:ro
+      - llmop-data:/data
+    environment:
+      TZ: ${TZ:-UTC}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  llmop-data:

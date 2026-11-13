@@ -1,0 +1,20 @@
+# Normalise line endings in the repository; check out the right ones per file type.
+* text=auto
+
+# cmd.exe misreads labels / goto in LF-only batch files: always CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# These run on Linux (Docker, CI) or are read by tools that expect LF.
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+.gitattributes text eol=lf
+
+*.png binary
+*.ico binary
+*.whl binary

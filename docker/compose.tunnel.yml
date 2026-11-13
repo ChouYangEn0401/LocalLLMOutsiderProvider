@@ -1,0 +1,31 @@
+# Add-on: a Cloudflare quick tunnel = a public https://....trycloudflare.com address
+# for llmop. No account, no domain, no open port on your router.
+#
+# Always use it TOGETHER with one of the other files, e.g.:
+#   docker compose -f compose.ollama.yml -f compose.tunnel.yml up -d --build
+#
+# Find the public address (it changes every time the cloudflared container restarts):
+#   Windows:  docker compose -f compose.ollama.yml -f compose.tunnel.yml logs cloudflared | findstr trycloudflare
+#   Linux:    docker compose -f compose.ollama.yml -f compose.tunnel.yml logs cloudflared | grep trycloudflare
+# (ignore "api.trycloudflare.com"; yours looks like https://some-random-words.trycloudflare.com)
+# A brand-new address can take up to a minute before it works.
+#
+# llmop (in its own container) cannot see this address by itself. Paste it into
+# docker/config/config.yaml as server.public_url so the web page and the API
+# examples show it (applies without a restart).
+#
+# Quick tunnels are for trying things out: streaming is best effort, at most 200
+# requests at once, and ~100 s without any reply ends a request (error 524).
+# For a fixed address use a named tunnel (free Cloudflare account + your domain):
+# replace "command:" below with
+#     command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN}"]
+# put CLOUDFLARE_TUNNEL_TOKEN=... in docker/.env, point the tunnel's public hostname
+# to http://llmop:8780 in the Cloudflare dashboard, and set server.public_url.
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--url", "http://llmop:8780"]
+    depends_on:
+      - llmop

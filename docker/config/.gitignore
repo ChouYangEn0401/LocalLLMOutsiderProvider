@@ -1,0 +1,3 @@
+# Your real config.yaml (with password hashes) lives in this folder: never commit it.
+*
+!.gitignore

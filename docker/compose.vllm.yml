@@ -1,0 +1,68 @@
+# llmop + vLLM, both in Docker. vLLM needs an NVIDIA GPU (Docker Desktop with the
+# WSL 2 backend on Windows, NVIDIA Container Toolkit on Linux).
+#
+# Settings go in a file named ".env" in this docker folder (it is git-ignored):
+#   VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct   the Hugging Face model to serve
+#   VLLM_MAX_MODEL_LEN=8192                 context length (smaller = less GPU memory)
+#   HF_TOKEN=hf_...                         only for gated models (e.g. Llama)
+#   VLLM_API_KEY=some-long-random-text      optional: vLLM then requires this key;
+#                                           llmop reads the same variable (config:
+#                                           api_key: env:VLLM_API_KEY)
+#   TZ=Asia/Taipei                          your time zone (daily quotas)
+#
+# Run every command inside this "docker" folder. First time:
+#   1. copy config.docker.example.yaml config\config.yaml      (Linux: cp ... config/config.yaml)
+#      and in config\config.yaml switch "backends:" to the vllm entry (http://vllm:8000)
+#   2. docker compose -f compose.vllm.yml run --rm --no-deps llmop hash-password
+#      -> paste the printed hash into config\config.yaml as the admin password_hash
+#   3. docker compose -f compose.vllm.yml up -d --build
+#      (the first start downloads the model; watch it with: docker compose -f compose.vllm.yml logs -f vllm)
+#   4. open http://127.0.0.1:8780
+# Public https address: add  -f compose.tunnel.yml  to every command.
+
+name: llmop
+
+services:
+  llmop:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: llmop:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8780:8780"      # only this computer; the internet comes in via the tunnel
+    volumes:
+      - ./config:/config:ro
+      - llmop-data:/data
+    environment:
+      TZ: ${TZ:-UTC}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+    depends_on:
+      - vllm
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    # No "ports:": only llmop talks to vLLM (http://vllm:8000 inside the Docker network).
+    command:
+      - --model
+      - ${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      - --max-model-len
+      - "${VLLM_MAX_MODEL_LEN:-8192}"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}   # same as --api-key; empty = no key required
+    volumes:
+      - hf-cache:/root/.cache/huggingface   # downloaded models are kept here
+    ipc: host                               # vLLM needs a large shared memory
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  llmop-data:
+  hf-cache:
