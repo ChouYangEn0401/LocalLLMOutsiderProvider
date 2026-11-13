@@ -1,0 +1,323 @@
+<title>llmop 部署手冊</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: single reading column; a "pick your setup" matrix up top, then one block per setup, then reference tables. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #1b2230;
+  --muted: #5b6577;
+  --line: #dde2ea;
+  --accent: #e8590c;          /* Cloudflare-ish orange, used sparingly */
+  --accent-soft: #fff1e8;
+  --code-bg: #10151f;
+  --code-fg: #e6ebf3;
+  --ok: #1f8a4c;
+  --warn: #b45309;
+  --warn-soft: #fff7e6;
+  --font-body: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f131a; --surface: #171c25; --fg: #e4e8ef; --muted: #9aa4b4; --line: #2a3140;
+    --accent: #ff8a3d; --accent-soft: #2b1d14; --code-bg: #0a0d12; --code-fg: #e6ebf3;
+    --ok: #4cc382; --warn: #f0b04a; --warn-soft: #2a2213; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f131a; --surface: #171c25; --fg: #e4e8ef; --muted: #9aa4b4; --line: #2a3140;
+  --accent: #ff8a3d; --accent-soft: #2b1d14; --code-bg: #0a0d12; --code-fg: #e6ebf3;
+  --ok: #4cc382; --warn: #f0b04a; --warn-soft: #2a2213; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  font-size: 15px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 860px; margin: 0 auto; padding-block: 40px 80px; display: grid; gap: 48px; }
+h1, h2, h3 { line-height: 1.3; text-wrap: balance; margin: 0; }
+h1 { font-size: 30px; font-weight: 700; }
+h2 { font-size: 22px; font-weight: 700; }
+h3 { font-size: 17px; font-weight: 700; }
+p { margin: 0; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.lead { color: var(--muted); max-width: 65ch; }
+section { display: grid; gap: 16px; min-width: 0; }
+header { display: grid; gap: 12px; }
+code { font-family: var(--font-mono); font-size: .88em; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+a { color: var(--accent); }
+
+/* pick-your-setup matrix */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14px; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 500; letter-spacing: .04em; }
+tr:last-child td { border-bottom: 0; }
+td a { font-weight: 700; text-decoration: none; }
+.pill { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.rec { border-color: var(--ok); color: var(--ok); }
+.pill.gpu { border-color: var(--warn); color: var(--warn); }
+
+/* diagram */
+.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-x: auto; }
+.diagram svg { display: block; min-width: 620px; width: 100%; height: auto; }
+.diagram text { font-family: var(--font-body); }
+
+/* setup blocks */
+.setup { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; scroll-margin-top: 16px; }
+.setup-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; }
+.setup-head .tag { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 14px; counter-reset: step; }
+.steps > li { display: grid; gap: 6px; padding-left: 32px; position: relative; min-width: 0; }
+.steps > li::before {
+  counter-increment: step; content: counter(step);
+  position: absolute; left: 0; top: 2px; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700;
+  display: grid; place-items: center; font-family: var(--font-mono);
+}
+.cmd { position: relative; background: var(--code-bg); color: var(--code-fg); border-radius: 6px; min-width: 0; }
+.cmd pre { margin: 0; padding: 10px 76px 10px 12px; overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.6; white-space: pre; }
+.cmd button {
+  position: absolute; top: 6px; right: 6px; font: 600 12px var(--font-body);
+  background: transparent; color: var(--code-fg); border: 1px solid #3a4456; border-radius: 4px; padding: 3px 9px; cursor: pointer;
+}
+.cmd button:hover { border-color: var(--accent); }
+.cmd button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.note { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 10px 14px; border-radius: 0 6px 6px 0; font-size: 14px; }
+.small { font-size: 13px; color: var(--muted); }
+
+/* glossary */
+.gloss { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.gloss div { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--surface); display: grid; gap: 4px; }
+.gloss dt { font-weight: 700; }
+.gloss dd { margin: 0; color: var(--muted); font-size: 14px; }
+dl { margin: 0; }
+
+.faq { display: grid; gap: 10px; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; }
+summary { cursor: pointer; font-weight: 700; }
+details[open] summary { margin-bottom: 8px; }
+details p + p { margin-top: 8px; }
+footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+@media (max-width: 480px) { h1 { font-size: 24px; } .setup { padding: 16px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">LocalLLMOutsiderProvider · v0.1</div>
+  <h1>把家裡的本地 LLM 分享出去：五種部署方式</h1>
+  <p class="lead">llmop 是一層小小的閘道：它站在 Ollama 或 vLLM 前面，負責登入、API key 和 token 額度，再透過 Cloudflare tunnel 給外面的人用。這頁說明有哪幾種擺法、各要打哪些指令。Docker 不熟也沒關係，最推薦的方式根本不用 Docker。</p>
+</header>
+
+<section>
+  <h2>先選一種</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>方式</th><th>Docker 裡跑什麼</th><th>適合誰</th><th>需要</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#setup-a">A · Windows 直接跑</a> <span class="pill rec">推薦</span></td><td>不用 Docker</td><td>Ollama 已經裝在 Windows 上，想最快開始</td><td>Python 3.10+、cloudflared</td></tr>
+        <tr><td><a href="#setup-b">B · Docker 接主機 Ollama</a></td><td>只有 llmop</td><td>想把閘道關在容器裡，Ollama 照舊</td><td>Docker Desktop</td></tr>
+        <tr><td><a href="#setup-c">C · llmop + Ollama</a></td><td>llmop、Ollama</td><td>全部放進容器，一行指令開關</td><td>Docker Desktop（GPU 可選）</td></tr>
+        <tr><td><a href="#setup-d">D · llmop + vLLM</a> <span class="pill gpu">需 NVIDIA GPU</span></td><td>llmop、vLLM</td><td>要高併發、HuggingFace 模型</td><td>Docker Desktop + WSL 2 + NVIDIA 驅動</td></tr>
+        <tr><td><a href="#setup-e">E · 加上 tunnel</a></td><td>cloudflared</td><td>B、C、D 任一種想要公開網址</td><td>疊在 B/C/D 上用</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>流量怎麼走</h2>
+  <div class="diagram" role="img" aria-label="使用者經由 trycloudflare 網址到 cloudflared，再到 llmop 的 8780 port，llmop 依路徑分成 API 層與網頁層，最後轉送到 Ollama 或 vLLM">
+    <svg viewBox="0 0 760 230" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+      <g font-size="13" fill="var(--fg)">
+        <rect x="10" y="40" width="130" height="64" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="75" y="66" text-anchor="middle" font-weight="700">朋友 / 你的手機</text>
+        <text x="75" y="86" text-anchor="middle" fill="var(--muted)" font-size="11">OpenAI SDK · 瀏覽器</text>
+
+        <rect x="10" y="140" width="130" height="64" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="75" y="166" text-anchor="middle" font-weight="700">Cloudflare</text>
+        <text x="75" y="186" text-anchor="middle" fill="var(--muted)" font-size="11">xxx.trycloudflare.com</text>
+
+        <rect x="190" y="140" width="120" height="64" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="250" y="166" text-anchor="middle" font-weight="700">cloudflared</text>
+        <text x="250" y="186" text-anchor="middle" fill="var(--muted)" font-size="11">只往外連線</text>
+
+        <rect x="360" y="20" width="200" height="190" rx="10" fill="var(--surface)" stroke="var(--fg)" stroke-width="1.5"/>
+        <text x="460" y="46" text-anchor="middle" font-weight="700">llmop  127.0.0.1:8780</text>
+        <rect x="378" y="62" width="164" height="56" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+        <text x="460" y="85" text-anchor="middle" font-weight="700" font-size="12">/v1/*  API 層</text>
+        <text x="460" y="104" text-anchor="middle" fill="var(--muted)" font-size="11">API key · 額度 · 記帳</text>
+        <rect x="378" y="132" width="164" height="56" rx="6" fill="var(--bg)" stroke="var(--line)"/>
+        <text x="460" y="155" text-anchor="middle" font-weight="700" font-size="12">/ui/*  網頁層</text>
+        <text x="460" y="174" text-anchor="middle" fill="var(--muted)" font-size="11">登入 · 用量 · 申請 key</text>
+
+        <rect x="610" y="40" width="140" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="680" y="64" text-anchor="middle" font-weight="700">Ollama</text>
+        <text x="680" y="83" text-anchor="middle" fill="var(--muted)" font-size="11">:11434 不對外</text>
+        <rect x="610" y="120" width="140" height="56" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+        <text x="680" y="144" text-anchor="middle" font-weight="700">vLLM</text>
+        <text x="680" y="163" text-anchor="middle" fill="var(--muted)" font-size="11">:8000 不對外</text>
+      </g>
+      <g stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)">
+        <path d="M75 104 L75 136"/>
+        <path d="M140 172 L186 172"/>
+        <path d="M310 172 L356 150"/>
+        <path d="M542 90 L606 70"/>
+        <path d="M542 90 L606 146"/>
+      </g>
+    </svg>
+  </div>
+  <p class="small">對外只有 cloudflared 一條路，而且是它主動往外連，所以路由器不用開 port。Ollama 本身沒有密碼，在每種方式裡都不會對外公開。</p>
+</section>
+
+<section class="setup" id="setup-a">
+  <div class="setup-head"><span class="tag">A</span><h3>Windows 直接跑（不用 Docker）</h3><span class="pill rec">推薦</span></div>
+  <p>Ollama 照你平常的方式裝在 Windows 上。llmop 跑在旁邊，同一台電腦用 127.0.0.1 互連，最單純。</p>
+  <ol class="steps">
+    <li><span>安裝 cloudflared（一次就好）：</span>
+      <div class="cmd"><pre>winget install --id Cloudflare.cloudflared</pre><button type="button">複製</button></div></li>
+    <li><span>用 GitHub Release 下載的 whl 安裝（或在專案資料夾雙擊 <code>scripts\windows\Setup.bat</code>，它會建 .venv、裝套件、執行 init）：</span>
+      <div class="cmd"><pre>pip install localllm_outsider_provider-0.1.0-py3-none-any.whl</pre><button type="button">複製</button></div></li>
+    <li><span>建立 <code>config.yaml</code> 並設定 admin 密碼：</span>
+      <div class="cmd"><pre>llmop init</pre><button type="button">複製</button></div></li>
+    <li><span>啟動並開 tunnel，畫面會印出 https://….trycloudflare.com：</span>
+      <div class="cmd"><pre>llmop serve --tunnel</pre><button type="button">複製</button></div></li>
+    <li><span>打開那個網址，登入，在「API 金鑰」申請一把 key（只會顯示一次）。新增朋友帳號：</span>
+      <div class="cmd"><pre>llmop add-user friend1</pre><button type="button">複製</button></div></li>
+  </ol>
+  <p class="note">Ollama 預設 context 很小，超過時會悄悄截掉前面的內容。建議在 Windows 的環境變數加上 <code>OLLAMA_CONTEXT_LENGTH=8192</code>，然後重開 Ollama。</p>
+</section>
+
+<section class="setup" id="setup-b">
+  <div class="setup-head"><span class="tag">B</span><h3>Docker 只跑 llmop，接 Windows 上的 Ollama</h3></div>
+  <p>容器裡的程式要連到主機，得用 <code>host.docker.internal</code> 這個名字（Docker Desktop 內建）。以下指令都在專案的 <code>docker</code> 資料夾裡執行。</p>
+  <ol class="steps">
+    <li><span>複製設定檔，把 <code>backends</code> 的 base_url 改成 <code>http://host.docker.internal:11434</code>：</span>
+      <div class="cmd"><pre>copy config.docker.example.yaml config\config.yaml</pre><button type="button">複製</button></div></li>
+    <li><span>產生 admin 密碼雜湊，貼進 <code>config\config.yaml</code> 的 <code>password_hash</code>：</span>
+      <div class="cmd"><pre>docker compose -f compose.host-ollama.yml run --rm llmop hash-password</pre><button type="button">複製</button></div></li>
+    <li><span>建置並在背景啟動：</span>
+      <div class="cmd"><pre>docker compose -f compose.host-ollama.yml up -d --build</pre><button type="button">複製</button></div></li>
+    <li><span>打開 <code>http://127.0.0.1:8780</code> 登入。</span></li>
+  </ol>
+</section>
+
+<section class="setup" id="setup-c">
+  <div class="setup-head"><span class="tag">C</span><h3>llmop + Ollama 都在 Docker</h3></div>
+  <p>Ollama 在容器網路裡叫 <code>ollama</code>，所以 base_url 是 <code>http://ollama:11434</code>（範例設定檔預設就是這個）。模型存在 <code>ollama-models</code> volume，關掉容器也不會消失。</p>
+  <ol class="steps">
+    <li><span>複製設定檔：</span>
+      <div class="cmd"><pre>copy config.docker.example.yaml config\config.yaml</pre><button type="button">複製</button></div></li>
+    <li><span>產生密碼雜湊，貼進設定檔：</span>
+      <div class="cmd"><pre>docker compose -f compose.ollama.yml run --rm --no-deps llmop hash-password</pre><button type="button">複製</button></div></li>
+    <li><span>啟動：</span>
+      <div class="cmd"><pre>docker compose -f compose.ollama.yml up -d --build</pre><button type="button">複製</button></div></li>
+    <li><span>在容器裡拉模型：</span>
+      <div class="cmd"><pre>docker compose -f compose.ollama.yml exec ollama ollama pull qwen3.5:9b</pre><button type="button">複製</button></div></li>
+  </ol>
+  <p class="small">要用 GPU：Docker Desktop 選 WSL 2 後端、裝新版 NVIDIA 驅動，再把 <code>compose.ollama.yml</code> 裡註解掉的 <code>deploy:</code> 區塊打開。</p>
+</section>
+
+<section class="setup" id="setup-d">
+  <div class="setup-head"><span class="tag">D</span><h3>llmop + vLLM</h3><span class="pill gpu">需 NVIDIA GPU</span></div>
+  <p>vLLM 直接從 HuggingFace 載模型，適合多人同時用。設定放在 <code>docker\.env</code>（不會進版控）。</p>
+  <ol class="steps">
+    <li><span>建立 <code>docker\.env</code>，至少寫上模型：</span>
+      <div class="cmd"><pre>VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
+VLLM_MAX_MODEL_LEN=8192
+TZ=Asia/Taipei</pre><button type="button">複製</button></div></li>
+    <li><span>複製設定檔，把 <code>backends</code> 換成 vllm 那段（<code>http://vllm:8000</code>），並產生密碼雜湊：</span>
+      <div class="cmd"><pre>docker compose -f compose.vllm.yml run --rm --no-deps llmop hash-password</pre><button type="button">複製</button></div></li>
+    <li><span>啟動。第一次會下載模型，可以看 log 等它好：</span>
+      <div class="cmd"><pre>docker compose -f compose.vllm.yml up -d --build</pre><button type="button">複製</button></div>
+      <div class="cmd"><pre>docker compose -f compose.vllm.yml logs -f vllm</pre><button type="button">複製</button></div></li>
+  </ol>
+</section>
+
+<section class="setup" id="setup-e">
+  <div class="setup-head"><span class="tag">E</span><h3>加上公開網址（疊在 B、C、D 上）</h3></div>
+  <p>在原本的指令後面多加 <code>-f compose.tunnel.yml</code>，就會多跑一個 cloudflared 容器。以 C 為例：</p>
+  <ol class="steps">
+    <li><span>啟動：</span>
+      <div class="cmd"><pre>docker compose -f compose.ollama.yml -f compose.tunnel.yml up -d --build</pre><button type="button">複製</button></div></li>
+    <li><span>找出公開網址（忽略 api.trycloudflare.com，你的是一串隨機英文字）：</span>
+      <div class="cmd"><pre>docker compose -f compose.ollama.yml -f compose.tunnel.yml logs cloudflared | findstr trycloudflare</pre><button type="button">複製</button></div></li>
+    <li><span>把網址貼到 <code>config\config.yaml</code> 的 <code>server.public_url</code>，存檔就生效。這樣網頁上的範例會顯示正確的網址。</span></li>
+  </ol>
+  <p class="small">方式 A 不需要這步：<code>llmop serve --tunnel</code> 會自己抓網址，顯示在網頁上，也寫進 <code>data\public_url.txt</code>。</p>
+</section>
+
+<section>
+  <h2>Docker 小辭典</h2>
+  <dl class="gloss">
+    <div><dt>image（映像檔）</dt><dd>打包好的程式加執行環境。<code>--build</code> 會用 <code>docker/Dockerfile</code> 做出 llmop 的 image。</dd></div>
+    <div><dt>container（容器）</dt><dd>image 跑起來的樣子。可以想成一台小虛擬機，關掉再開，裡面的暫存東西會消失。</dd></div>
+    <div><dt>compose 檔</dt><dd>一次描述好幾個容器怎麼一起跑。<code>-f</code> 指定用哪個檔，可以疊好幾個。</dd></div>
+    <div><dt>volume</dt><dd>容器外的永久儲存。用量紀錄、key、模型都放這裡。<code>down</code> 會保留，<code>down -v</code> 會刪掉。</dd></div>
+    <div><dt>127.0.0.1:8780</dt><dd>只開給這台電腦。外面的人只能透過 tunnel 進來，所以範例都寫這個，不要改成 <code>8780:8780</code>。</dd></div>
+    <div><dt>host.docker.internal</dt><dd>容器裡用來指「主機（你的 Windows）」的名字。</dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>常用指令</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>要做什麼</th><th>直接跑（A）</th><th>Docker（以 C 為例）</th></tr></thead>
+      <tbody>
+        <tr><td>檢查設定與後端</td><td><code>llmop check</code></td><td><code>docker compose -f compose.ollama.yml run --rm --no-deps llmop check</code></td></tr>
+        <tr><td>看用量</td><td><code>llmop usage</code></td><td><code>… run --rm --no-deps llmop usage</code></td></tr>
+        <tr><td>列出 / 撤銷 key</td><td><code>llmop keys</code> / <code>llmop revoke-key ID</code></td><td><code>… run --rm --no-deps llmop keys</code></td></tr>
+        <tr><td>停止</td><td>關掉視窗或 Ctrl+C</td><td><code>docker compose -f compose.ollama.yml down</code></td></tr>
+        <tr><td>看 log</td><td>視窗本身</td><td><code>docker compose -f compose.ollama.yml logs -f llmop</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>一定會遇到的問題</h2>
+  <div class="faq">
+    <details open><summary>重開之後網址變了，朋友怎麼辦？</summary>
+      <p>Quick tunnel 每次啟動都會換一個隨機網址。朋友登入網頁就能看到最新網址；API key 不會因此失效，只要換 base_url。</p>
+      <p>想要固定網址：在 Cloudflare 免費帳號加上自己的網域，建立 named tunnel，再把 config 的 <code>tunnel.mode</code> 設成 <code>named</code>、<code>token: env:CLOUDFLARE_TUNNEL_TOKEN</code>，並把 <code>server.public_url</code> 填上你的網域。</p></details>
+    <details><summary>串流（stream: true）有時候卡住或一次吐出來</summary>
+      <p>Cloudflare 官方文件寫 quick tunnel 不支援 SSE 串流。實際上大多能用，但不保證。llmop 在等待第一個字時會每 15 秒送 keepalive 來減少中斷。真的不穩時改用 <code>stream: false</code>，或改用 named tunnel。</p></details>
+    <details><summary>出現 524 錯誤</summary>
+      <p>Cloudflare 大約 100 秒收不到任何回應就會切斷。模型很慢、又沒開串流的時候會遇到。請用串流，或降低 <code>max_tokens</code>。</p></details>
+    <details><summary>回答突然變笨、好像忘了前面說過的話</summary>
+      <p>這通常是 Ollama 的 context 太小，前面的內容被靜默截掉了。設定 <code>OLLAMA_CONTEXT_LENGTH</code>（Docker 的話寫在 compose 的 ollama environment 裡）。</p></details>
+    <details><summary>額度怎麼算？</summary>
+      <p>每日、每月 token 從資料庫加總，依主機時間的午夜和月初重置。每分鐘請求數和同時請求數記在記憶體裡。請求前會先檢查，再把 <code>max_tokens</code> 壓到剩餘額度，結束後依實際用量記帳，所以單次可能稍微超過一點，跟 OpenAI、LiteLLM 的作法相同。</p></details>
+  </div>
+</section>
+
+<footer>LocalLLMOutsiderProvider v0.1 · 詳細研究見 repo 的 docs/research/RESEARCH_REPORT.md，開發計畫見 docs/plan/DEVELOPMENT_PLAN.md。</footer>
+</main>
+
+<script>
+document.querySelectorAll('.cmd button').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var pre = btn.parentElement.querySelector('pre');
+    var text = pre.textContent;
+    var done = function () { btn.textContent = '已複製'; setTimeout(function () { btn.textContent = '複製'; }, 1500); };
+    var fallback = function () {
+      var r = document.createRange(); r.selectNodeContents(pre);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      btn.textContent = '已選取，按 Ctrl+C';
+    };
+    try {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } catch (e) { fallback(); }
+  });
+});
+</script>

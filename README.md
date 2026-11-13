@@ -148,7 +148,7 @@ python -m venv .venv
 
 - [研究報告](docs/research/RESEARCH_REPORT.md)
 - [開發計畫書](docs/plan/DEVELOPMENT_PLAN.md)
-- [Docker 用法](docker/README.md)
+- [Docker 用法](docker/README.md) · [部署手冊 (HTML)](docs/DEPLOYMENT_GUIDE.html)
 
 ## License
 
