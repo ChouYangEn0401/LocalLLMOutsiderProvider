@@ -7,7 +7,7 @@ import os
 import stat
 
 import pytest
-from worker_support import MODEL, PROMPT, REPLY, FakeLLM, sign_and_seal
+from worker_support import MODEL, PROMPT, REPLY, sign_and_seal
 
 from llmop import paths, protocol
 from llmop.worker import cli

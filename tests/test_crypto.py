@@ -9,7 +9,6 @@ from cryptography.hazmat.primitives import hpke
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from llmop import crypto
 from llmop.crypto import (
     SUITE,
     ReplyOpener,

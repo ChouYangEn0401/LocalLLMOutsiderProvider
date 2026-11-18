@@ -16,6 +16,8 @@ from aiohttp import web
 from llmop import protocol
 from llmop.protocol import RESULT_TTL_SECONDS, Envelope, ProtocolError
 
+from .store import Store
+
 log = logging.getLogger(__name__)
 
 # 每台 worker 最多可以排隊的請求數 = 這個倍數 × max_concurrency。
@@ -48,6 +50,7 @@ class Job:
     worker_id: str
     model: str
     day: str  # 計入配額的 UTC 日期，token 用量也記在這一天
+    max_tokens: int  # admit 保留的量；工作結束時 finish() 一定要釋放剛好這麼多
     started_at: float
     conn: WorkerConn = field(repr=False)
     done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -59,7 +62,8 @@ class Job:
 
 
 class Hub:
-    def __init__(self, max_inflight: int, request_timeout_seconds: float) -> None:
+    def __init__(self, store: Store, max_inflight: int, request_timeout_seconds: float) -> None:
+        self.store = store
         self.max_inflight = max_inflight
         self.request_timeout_seconds = request_timeout_seconds
         self.workers: dict[str, WorkerConn] = {}
@@ -140,8 +144,9 @@ class Hub:
     def get(self, api_key_id: str, request_id: str) -> Job | None:
         return self.jobs.get((api_key_id, request_id))
 
-    def submit(self, conn: WorkerConn, api_key_id: str, request_id: str, model: str, day: str) -> Job:
-        """登記一筆即將轉送的請求，並排定逾時。呼叫前必須已通過 route 與 check_capacity。"""
+    def submit(self, conn: WorkerConn, api_key_id: str, request_id: str, model: str, day: str, max_tokens: int) -> Job:
+        """登記一筆即將轉送的請求，並排定逾時。呼叫前必須已通過 route、check_capacity 與 store.admit
+        （max_tokens 必須是 admit 剛保留的那個量，finish() 會原封不動釋放它）。"""
         loop = asyncio.get_running_loop()
         job = Job(
             api_key_id=api_key_id,
@@ -149,6 +154,7 @@ class Hub:
             worker_id=conn.worker_id,
             model=model,
             day=day,
+            max_tokens=max_tokens,
             started_at=loop.time(),
             conn=conn,
         )
@@ -169,7 +175,12 @@ class Hub:
             self.finish(job, None, "worker_disconnected", "無法把請求送給 worker")
 
     def finish(self, job: Job, sealed: str | None, code: str | None = None, message: str = "") -> None:
-        """記錄結果並喚醒等待者。已經完成的工作不會被改寫。"""
+        """記錄結果並喚醒等待者。已經完成的工作不會被改寫（所以下面的釋放一定只做一次）。
+
+        不管工作是成功、失敗、逾時還是因為斷線而結束，都要把 admit 當初保留的 max_tokens
+        還回去；真正的用量是另外由呼叫端在 finish() 之後自己呼叫 store.add_tokens 加上去的
+        （只有成功拿到 worker 回覆的那一條路才會加）。
+        """
         if job.finished_at is not None:
             return
         if job.timer is not None:
@@ -178,6 +189,7 @@ class Hub:
         job.finished_at = asyncio.get_running_loop().time()
         self._inflight.pop(job.request_id, None)
         job.conn.pending.pop(job.request_id, None)
+        self.store.release_reservation(job.api_key_id, job.day, job.max_tokens)
         job.done.set()
 
     async def wait(self, job: Job, timeout: float) -> bool:

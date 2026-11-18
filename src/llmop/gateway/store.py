@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS usage (
     requests INTEGER NOT NULL DEFAULT 0,
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
+    reserved_tokens INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (api_key_id, day)
 );
 CREATE TABLE IF NOT EXISTS workers (
@@ -254,33 +255,53 @@ class Store:
 
     @contextmanager
     def admit(self, api_key_id: str, max_tokens: int, day: str) -> Iterator[None]:
-        """在同一個交易裡檢查配額並把請求數加一。
+        """在同一個交易裡檢查配額、把請求數加一，並「保留」max_tokens。
 
-        超過配額丟 quota_exceeded。with 區塊正常結束才計數並提交；區塊內丟出例外就回滾，
-        不計數。區塊內不可以 await，否則其他請求可能在交易中途插進來。
+        超過配額丟 quota_exceeded。with 區塊正常結束才計數、保留並提交；區塊內丟出例外就回滾，
+        不計數也不保留。區塊內不可以 await，否則其他請求可能在交易中途插進來。
+
+        reserved_tokens 是還在進行中、尚未結算的請求各自的 max_tokens 總和：同時有好幾筆
+        請求在等 worker 回覆時，光看「已完成的用量」會讓它們全部通過檢查，合計超過上限
+        （例如上限 100、兩筆都還在跑的 max_tokens=60 都會通過）。所以配額檢查要看
+        「已完成用量 + 保留中 + 這一筆的 max_tokens」。工作結束時（不管成功、失敗、逾時或
+        斷線）一定要呼叫 release_reservation 把保留的這一份還回去，見 hub.Hub.finish。
         """
         with self._tx():
             limits = self.db.execute(
                 "SELECT daily_request_limit, daily_token_limit FROM api_keys WHERE id = ?", (api_key_id,)
             ).fetchone()
             used = self.db.execute(
-                "SELECT requests, prompt_tokens + completion_tokens FROM usage WHERE api_key_id = ? AND day = ?",
+                "SELECT requests, prompt_tokens + completion_tokens, reserved_tokens "
+                "FROM usage WHERE api_key_id = ? AND day = ?",
                 (api_key_id, day),
-            ).fetchone() or (0, 0)
+            ).fetchone() or (0, 0, 0)
             request_limit, token_limit = limits
             if request_limit is not None and used[0] >= request_limit:
                 raise ProtocolError("quota_exceeded", "今天的請求數已達上限")
-            if token_limit is not None and used[1] + max_tokens > token_limit:
-                raise ProtocolError("quota_exceeded", "今天的 token 用量加上 max_tokens 會超過上限")
+            if token_limit is not None and used[1] + used[2] + max_tokens > token_limit:
+                raise ProtocolError("quota_exceeded", "今天的 token 用量加上進行中的保留與這筆的 max_tokens 會超過上限")
             yield
             self.db.execute(
-                "INSERT INTO usage (api_key_id, day, requests) VALUES (?, ?, 1) "
-                "ON CONFLICT(api_key_id, day) DO UPDATE SET requests = requests + 1",
-                (api_key_id, day),
+                "INSERT INTO usage (api_key_id, day, requests, reserved_tokens) VALUES (?, ?, 1, ?) "
+                "ON CONFLICT(api_key_id, day) DO UPDATE SET "
+                "requests = requests + 1, reserved_tokens = reserved_tokens + excluded.reserved_tokens",
+                (api_key_id, day, max_tokens),
             )
 
+    def release_reservation(self, api_key_id: str, day: str, max_tokens: int) -> None:
+        """工作結束時釋放 admit 保留的 max_tokens（不管結果是成功、失敗、逾時還是斷線都要呼叫一次）。
+
+        用 MAX(…, 0) 夾住下限，單純求穩：正常情況下每筆保留只會被釋放一次，不會變負的。
+        """
+        if max_tokens <= 0:
+            return
+        self.db.execute(
+            "UPDATE usage SET reserved_tokens = MAX(reserved_tokens - ?, 0) WHERE api_key_id = ? AND day = ?",
+            (max_tokens, api_key_id, day),
+        )
+
     def add_tokens(self, api_key_id: str, day: str, prompt_tokens: int, completion_tokens: int) -> None:
-        """把 worker 回報的 token 數加進那一天的用量。"""
+        """把 worker 回報的 token 數加進那一天的用量（跟保留的釋放是分開呼叫的兩件事，見 release_reservation）。"""
         self.db.execute(
             "INSERT INTO usage (api_key_id, day, prompt_tokens, completion_tokens) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(api_key_id, day) DO UPDATE SET prompt_tokens = prompt_tokens + excluded.prompt_tokens, "

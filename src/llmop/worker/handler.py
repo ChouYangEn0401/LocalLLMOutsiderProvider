@@ -86,6 +86,10 @@ class Handler:
         """回傳 (回覆明文, (prompt_tokens, completion_tokens), 後端名稱)。失敗時 token 數為 0。"""
         if "stream" in body and body["stream"] is not False:
             return _failure("bad_request", "不支援串流：stream 必須是 false 或省略"), (0, 0), None
+        for completions_param in ("n", "best_of"):
+            if completions_param in body and body[completions_param] not in (None, 1):
+                # 閘道只依標頭的 max_tokens 做配額，n／best_of > 1 會讓後端實際用量倍增而不被計入。
+                return _failure("bad_request", f"不支援 {completions_param} > 1：請求一次只能要一個回覆"), (0, 0), None
         backend = self.routes.get(header.model)
         if backend is None:  # 解密期間模型清單剛好更新，模型消失了
             return _failure("model_unavailable", "這台 worker 已不再提供這個模型"), (0, 0), None

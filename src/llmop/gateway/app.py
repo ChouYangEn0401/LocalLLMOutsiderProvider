@@ -24,7 +24,7 @@ def build_app(config: GatewayConfig, store: Store) -> web.Application:
     app = web.Application()
     app[CONFIG] = config
     app[STORE] = store
-    app[HUB] = Hub(config.max_inflight, config.request_timeout_seconds)
+    app[HUB] = Hub(store, config.max_inflight, config.request_timeout_seconds)
     api.setup(app)
     app.router.add_get("/worker/ws", worker_ws.handle)
     admin.setup(app)

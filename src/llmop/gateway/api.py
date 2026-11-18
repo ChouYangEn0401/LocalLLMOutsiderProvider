@@ -157,7 +157,7 @@ async def _chat(request: web.Request, trace: dict) -> web.Response:
     trace["worker_id"] = conn.worker_id
 
     # 9. 已計入配額；轉送給 worker，最多等 sync_wait_seconds。
-    job = hub.submit(conn, key.id, header.request_id, header.model, day)
+    job = hub.submit(conn, key.id, header.request_id, header.model, day, header.max_tokens)
     await hub.relay(job, envelope, key.sig_public_key)
     await hub.wait(job, config.sync_wait_seconds)
     return job_response(job)
