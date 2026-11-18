@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 虛擬環境與工具快取
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 執行期狀態（金鑰、權杖、資料庫）一律放在 LLMOP_HOME，萬一放進專案目錄也不要提交
+.llmop/
+*.db
+
+# 編輯器與系統檔
+.idea/
+.vscode/
+.DS_Store

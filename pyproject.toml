@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmop"
+version = "0.1.0"
+description = "LocalLLMOutsiderProvider：透過端對端加密的閘道，把本機 LLM 提供給外部使用"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=47",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-aiohttp",
+    "pyhpke",
+]
+
+[project.scripts]
+llmop = "llmop.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# 閘道管理介面的靜態檔（index.html、app.js、style.css）。
+"llmop.gateway" = ["static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
