@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from llmop import crypto, paths
-from llmop.protocol import Envelope, b64u_decode, b64u_encode
+from llmop.protocol import b64u_decode, b64u_encode
 from llmop.worker import cli as worker_cli
 
 from .harness import (

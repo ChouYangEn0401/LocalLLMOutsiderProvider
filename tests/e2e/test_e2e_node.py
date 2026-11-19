@@ -28,7 +28,6 @@ from .harness import (
     MODELS,
     OLLAMA_MODEL,
     ROOT_PASSWORD,
-    FakeCloudflared,
     WebClient,
 )
 
