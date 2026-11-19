@@ -175,6 +175,8 @@ llmop tunnel rotate-api --change-host --grace 600
   「Context size has been exceeded」時，閘道轉成 400 `context_length_exceeded`；完整處理排在 v0.3。
 - **加密模式在 v0.2 不做真串流**（代理送一個完整的 chunk）。
 - **不要把 LLM 伺服器（11434、1234）或本機控制台（8781）對外。** 只用 `llmop serve` 自己開的兩個通道。
+- **`image_url` 沒有過濾（v0.3 才處理）。** 閘道原樣轉送訊息裡的 `image_url`；如果你的後端（例如 vLLM、部分 LM Studio
+  版本）會自己去下載網址，持有 key 的人就能讓後端去連你內網的網址（SSRF）。v0.2 請用不會抓遠端圖片的後端，或只發 key 給信任的人。
 - Docker 與 CI 檔案是 v0.1 時代的，還沒有為 v0.2 更新（[docs/HANDOFF.md](docs/HANDOFF.md)）。
 
 ## 安全邊界

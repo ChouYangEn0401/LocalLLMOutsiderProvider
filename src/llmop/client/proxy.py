@@ -140,7 +140,7 @@ async def _read_json(request: web.Request) -> dict:
         raise ClientError("payload_too_large", "請求本文太大") from None
     try:
         body = json.loads(raw, parse_constant=_reject_constant)
-    except ValueError:
+    except (ValueError, RecursionError):  # 巢狀過深回 400，不是 500
         raise ClientError("bad_request", "請求本文不是合法的 JSON", status=400) from None
     if not isinstance(body, dict):
         raise ClientError("bad_request", "請求本文必須是 JSON 物件", status=400)

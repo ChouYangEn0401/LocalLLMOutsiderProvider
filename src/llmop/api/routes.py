@@ -104,7 +104,7 @@ async def read_json(request: Request, limit: int | None = None) -> Any:
         raise ApiError(400, "The request body is empty; expected a JSON object.", code="invalid_json")
     try:
         return json.loads(raw)
-    except ValueError:  # includes UnicodeDecodeError
+    except (ValueError, RecursionError):  # includes UnicodeDecodeError; too deep -> 400
         raise ApiError(
             400, "We could not parse the JSON body of your request. Send a JSON object "
             "with 'Content-Type: application/json'.", code="invalid_json",

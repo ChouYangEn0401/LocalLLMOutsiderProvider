@@ -234,7 +234,7 @@ async def _read_json(request: Request) -> dict:
     raw = b"".join(chunks)
     try:
         data = json.loads(raw or b"{}")
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):  # too deep -> 400, not 500
         raise WebError(400, "JSON 格式錯誤 (invalid JSON).", "invalid_json") from None
     if not isinstance(data, dict):
         raise WebError(400, "JSON 必須是物件 (expected a JSON object).", "invalid_json")

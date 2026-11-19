@@ -445,7 +445,9 @@ class TunnelManager:
 
     def _publish(self, url: str) -> None:
         url = url.rstrip("/")
-        self.url = url
+        # Persist first, then expose ``self.url``: readers (tests, the API link, the node
+        # waiting for a replacement tunnel) treat a set ``url`` as "published", so the
+        # store row and the URL file must already be there (T-R: test race).
         if self.store is not None:
             try:
                 self.store.kv_set(self._kv_key, url)
@@ -457,6 +459,7 @@ class TunnelManager:
                 (self.data_dir / self._url_file).write_text(url + "\n", encoding="utf-8")
             except OSError as exc:
                 log.warning("could not write %s: %s", self._url_file, exc)
+        self.url = url
         self._banner(url)
         if self.on_url is not None:
             try:

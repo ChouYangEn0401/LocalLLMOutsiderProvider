@@ -230,7 +230,13 @@ def register_console_routes(
 
     @router.get("/ui/api/admin/config")
     async def api_admin_config_get(request: Request):
-        require_admin(request)
+        user = require_admin(request)
+        if getattr(user.session, "origin", "") == "remote":
+            # The raw file holds secrets (password hashes, backend keys, tunnel tokens):
+            # like the admin writes, never for a session from the account website
+            # (cookies are shared across ports on 127.0.0.1). T-R hardening.
+            raise WebError(403, "請在本機控制台重新登入後再操作 (log in on the local console).",
+                           "local_session_required")
         from .. import configedit
 
         path = _config_path()

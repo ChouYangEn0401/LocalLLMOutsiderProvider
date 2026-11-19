@@ -134,7 +134,7 @@ def loads_strict(data: str | bytes) -> object:
         return json.loads(data, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant)
     except ProtocolError:
         raise
-    except (ValueError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:  # 巢狀過深也是格式錯誤
         raise _bad("JSON 格式錯誤") from exc
 
 

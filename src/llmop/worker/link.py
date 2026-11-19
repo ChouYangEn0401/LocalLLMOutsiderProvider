@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -194,8 +195,13 @@ def _request_id_of(text: str) -> str | None:
     return None
 
 
+# 錯誤訊息（例如 aiohttp 的 WSServerHandshakeError）會帶完整網址；網址的第一段路徑可能是
+# 秘密的 gate，進紀錄前遮掉（T-R）。
+_URL_FIRST_SEGMENT = re.compile(r"(\b(?:wss?|https?)://[^/\s'\"]+/)[^/\s'\"]+")
+
+
 def _describe(exc: BaseException) -> str:
-    text = str(exc)
+    text = _URL_FIRST_SEGMENT.sub(r"\1***", str(exc))
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
