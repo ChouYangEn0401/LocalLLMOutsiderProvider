@@ -2,18 +2,24 @@
 
 Unzip, double-click Start.bat, done - no Python installation needed.
 
-    python scripts/build_portable.py                     # uses dist/*.whl
+    python -m build                                      # makes dist/*.whl first
+    python scripts/build_portable.py                     # uses dist/*.whl, downloads Python
     python scripts/build_portable.py --python-archive py.tar.gz
 
 Works on Linux or Windows (it only downloads Windows wheels and unpacks them;
 nothing is executed with the bundled Python). Output:
     dist/llmop-<version>-windows-x64-portable.zip
 
+Supply chain: the Python archive (downloaded or given with --python-archive) must
+match the pinned SHA-256 (PYTHON_SHA256); the build stops on any mismatch. Change
+PYTHON_URL and PYTHON_SHA256 together, or pass --python-url and --python-sha256.
+
 Layout inside the zip:
     llmop-<version>/
       python/                 standalone CPython (python-build-standalone, install_only)
-      python/Lib/site-packages/  llmop + dependencies (Windows wheels)
-      Start.bat, Start-With-Tunnel.bat, Add-User.bat, Check.bat, Command-Prompt.bat
+      python/Lib/site-packages/  llmop[secure] + dependencies (Windows wheels)
+      Start.bat, Start-With-Tunnel.bat, Start-Worker.bat, Start-Client-Proxy.bat,
+      Rotate-API-Link.bat, Add-User.bat, Check.bat, Command-Prompt.bat
       config.example.yaml, README.txt, docs/
 """
 
@@ -38,30 +44,53 @@ PYTHON_URL = (
     "https://github.com/astral-sh/python-build-standalone/releases/download/20251014/"
     "cpython-3.12.12%2B20251014-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
 )
+# sha256 of exactly that file. Never update it without updating PYTHON_URL.
+PYTHON_SHA256 = "3c8b9b10a933909c98b9916297e2093b24a9c2abaa23df1c2622c2bfe052cb94"
+
+# pip evaluates environment markers (sys_platform == "win32") for the machine that
+# runs the build, not for the --platform target, so Windows-only dependencies are
+# listed here explicitly: tzdata (zoneinfo has no system database on Windows; the
+# weekly reset uses it) and colorama (click / uvicorn console colours).
+WINDOWS_ONLY = ["tzdata", "colorama"]
+# Must be importable from the zip, or the build fails (llmop[secure] = encrypted mode).
+REQUIRED = ["llmop", "fastapi", "uvicorn", "httpx", "yaml", "cryptography", "aiohttp",
+            "websockets", "tzdata"]
+
+DOCS = ("README.md", "LICENSE", "docs/HANDOFF.md", "docs/DEPLOYMENT_GUIDE.html",
+        "docs/secure/README.md", "docs/secure/DEPLOY.md", "docs/secure/PROTOCOL.md",
+        "docs/secure/SECURITY.md")
 
 README_TXT = """\
 llmop {version} - Windows portable edition (Python included)
 =============================================================
 
-This folder is the SERVER side ("架設端"). People who use your models need
-nothing from here: they use any OpenAI-compatible tool with your URL + API key.
+This folder is the SERVER side. People who use your model need nothing from
+here for plain (direct) API keys: any OpenAI-compatible tool + the API link +
+an sk-llop- key. Only encrypted keys need "llmop client proxy" on their side.
 
-1. Make sure Ollama is running and has a model:   ollama pull qwen3.5:9b
-2. Double-click  Start.bat              (only this computer, http://127.0.0.1:8780)
-   or            Start-With-Tunnel.bat  (public https://....trycloudflare.com address)
+1. Start your LLM server (Ollama / LM Studio) and load the model.
+2. Double-click  Start.bat              this computer only; opens the local
+                                        console http://127.0.0.1:8781/
+   or            Start-With-Tunnel.bat  also two public https addresses
+                                        (account website + API link)
    The first start asks for the admin password and creates config.yaml.
-3. Log in on the web page and create an API key.
+3. In config.yaml set   model: <the model name>   (applies without restart).
 
-Add a friend:       Add-User.bat friend1
+Add an account:     Add-User.bat friend1   (tier: edit config.yaml)
 Check backends:     Check.bat
+New API link:       Rotate-API-Link.bat    (API keys stay valid)
+Encrypted mode:     Start-Worker.bat       (worker on another computer)
+                    Start-Client-Proxy.bat (the user's side, 127.0.0.1:8788)
 Other commands:     Command-Prompt.bat, then e.g.  llmop usage / llmop keys
-Quotas / accounts:  edit config.yaml with Notepad (applies without restart)
 Stop:               close the black window
 
-Update: unzip the new version into a NEW folder, then copy config.yaml and the
-data folder from the old one.
+WARNING: the "data" folder holds the database AND private keys
+(data\\llmop_home: worker and client keys). Do not share, upload or send it.
 
-Docs: docs\\HANDOFF.md, docs\\DEPLOYMENT_GUIDE.html (open in a browser)
+Update: unzip the new version into a NEW folder, then copy config.yaml and the
+whole data folder from the old one.
+
+Docs: docs\\README.md (start here), docs\\HANDOFF.md
 """
 
 
@@ -81,15 +110,36 @@ def fetch(url: str, dest: Path) -> None:
         shutil.copyfileobj(resp, fh)
 
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_archive(path: Path, expected: str) -> bool:
+    actual = sha256_file(path)
+    if actual != expected.lower():
+        log(f"REFUSED: {path.name} has sha256 {actual}")
+        log(f"         expected                {expected.lower()}")
+        log("         wrong or tampered file; nothing was built.")
+        return False
+    log(f"python archive sha256 OK ({actual})")
+    return True
+
+
 def crlf(text: str) -> bytes:
     return text.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--wheel", help="llmop wheel (default: newest dist/*.whl)")
+    ap.add_argument("--wheel", help="llmop wheel (default: newest dist/*.whl of this version)")
     ap.add_argument("--python-archive", help="local python-build-standalone .tar.gz (default: download)")
     ap.add_argument("--python-url", default=PYTHON_URL)
+    ap.add_argument("--python-sha256", default=PYTHON_SHA256,
+                    help="expected sha256 of the Python archive (default: the pinned one)")
     ap.add_argument("--out", default=str(ROOT / "dist"))
     args = ap.parse_args(argv)
 
@@ -103,18 +153,18 @@ def main(argv: list[str] | None = None) -> int:
         wheel = Path(cands[-1])
 
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
     name = f"llmop-{ver}"
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        stage = tmp / name
-        stage.mkdir()
 
-        # 1. Python runtime
+        # 1. Python runtime (checked before anything is unpacked or installed)
         archive = Path(args.python_archive) if args.python_archive else tmp / "python.tar.gz"
         if not args.python_archive:
             fetch(args.python_url, archive)
-        log(f"python archive sha256 {hashlib.sha256(archive.read_bytes()).hexdigest()}")
+        if not verify_archive(archive, args.python_sha256):
+            return 1
+        stage = tmp / name
+        stage.mkdir()
         with tarfile.open(archive) as tf:
             tf.extractall(stage, filter="data") if sys.version_info >= (3, 12) else tf.extractall(stage)
         py_dir = stage / "python"
@@ -122,19 +172,23 @@ def main(argv: list[str] | None = None) -> int:
             log("archive has no python/python.exe - wrong file?")
             return 1
 
-        # 2. llmop + dependencies as Windows wheels, unpacked into site-packages
+        # 2. llmop[secure] + dependencies as Windows wheels, unpacked into site-packages
         site = py_dir / "Lib" / "site-packages"
         site.mkdir(parents=True, exist_ok=True)
-        log("installing llmop + dependencies (win_amd64 wheels)")
+        log("installing llmop[secure] + dependencies (win_amd64 wheels)")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", "--no-compile",
-             "--target", str(site), "--platform", "win_amd64",
+             "--disable-pip-version-check", "--target", str(site), "--platform", "win_amd64",
              "--python-version", PY_VERSION, "--implementation", "cp",
-             "--only-binary=:all:", "--upgrade", str(wheel)],
+             "--only-binary=:all:", "--upgrade", f"{wheel.resolve()}[secure]", *WINDOWS_ONLY],
             check=True,
         )
         # pip --target writes Linux-style console scripts; the .bat files use "python -m llmop".
         shutil.rmtree(site / "bin", ignore_errors=True)
+        missing = [m for m in REQUIRED if not (site / m).is_dir()]
+        if missing:
+            log(f"missing in site-packages: {', '.join(missing)}")
+            return 1
 
         # 3. launchers, docs, example config
         for bat in sorted((ROOT / "scripts/windows/portable").glob("*.bat")):
@@ -143,13 +197,14 @@ def main(argv: list[str] | None = None) -> int:
         (stage / "README.txt").write_bytes(README_TXT.format(version=ver).replace("\n", "\r\n").encode("utf-8-sig"))
         docs = stage / "docs"
         docs.mkdir()
-        for rel in ("README.md", "LICENSE", "docs/HANDOFF.md", "docs/DEPLOYMENT_GUIDE.html",
-                    "docs/research/RESEARCH_REPORT.md", "docs/plan/DEVELOPMENT_PLAN.md"):
+        for rel in DOCS:
             src = ROOT / rel
             if src.exists():
-                shutil.copy2(src, docs / src.name)
+                dest = docs / ("SECURE-" + src.name if rel.startswith("docs/secure/") else src.name)
+                shutil.copy2(src, dest)
 
         # 4. zip
+        out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"{name}-windows-x64-portable.zip"
         if target.exists():
             target.unlink()

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "localllm-outsider-provider"
 dynamic = ["version"]
-description = "Expose local LLM services (Ollama / vLLM / any OpenAI-compatible server) to online users with lightweight session login, API keys and token quotas."
+description = "Share a local LLM (Ollama / LM Studio / vLLM / any OpenAI-compatible server) with a few people over Cloudflare tunnels: accounts, API keys, tiers, usage meters, a queue and optional end-to-end encryption."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -43,7 +43,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 llmop = ["web/static/*", "examples/*"]
-"llmop.gateway" = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

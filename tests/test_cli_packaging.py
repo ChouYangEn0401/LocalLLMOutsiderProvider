@@ -120,3 +120,94 @@ def test_release_workflow():
     assert "python -m build" in runs and "pytest" in runs
     gh = next(s for s in steps if str(s.get("uses", "")).startswith("softprops/action-gh-release@v2"))
     assert gh["with"]["files"] == "dist/*"
+
+
+# ------------------------------------------------------------------ v0.2 packaging
+PORTABLE = WIN / "portable"
+PORTABLE_BATS = ["_env.bat", "_first_run.bat", "Start.bat", "Start-With-Tunnel.bat", "Start-Worker.bat",
+                 "Start-Client-Proxy.bat", "Rotate-API-Link.bat", "Add-User.bat", "Check.bat",
+                 "Command-Prompt.bat"]
+
+
+def _load_build_portable():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("build_portable", ROOT / "scripts" / "build_portable.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_version_is_0_2_0_everywhere():
+    import llmop
+
+    assert llmop.__version__ == "0.2.0"
+    py = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "llmop.gateway" not in py  # the B gateway package was removed in v0.2
+    assert 'secure = ["cryptography' in py and "aiohttp" in py and "websockets" in py
+    assert 'llmop = ["web/static/*", "examples/*"]' in py
+
+
+@pytest.mark.parametrize("name", PORTABLE_BATS)
+def test_portable_bat_files_are_ascii(name):
+    text = (PORTABLE / name).read_bytes().decode("ascii")  # CRLF is added by build_portable.py
+    if name == "_env.bat":
+        assert "chcp 65001" in text and "PYTHONUTF8=1" in text
+        assert r'set "LLMOP_HOME=%ROOT%\data\llmop_home"' in text  # private keys stay in the folder
+        assert r'set "LLMOP_CONFIG=%ROOT%\config.yaml"' in text
+    elif name != "_first_run.bat":
+        assert 'call "%~dp0_env.bat"' in text
+    if not name.startswith("_"):
+        assert "-m llmop" in text
+
+
+def test_portable_scripts_call_the_v02_commands():
+    def read(name: str) -> str:
+        return (PORTABLE / name).read_text(encoding="ascii")
+
+    assert "-m llmop serve --open" in read("Start.bat")
+    assert "_first_run.bat" in read("Start.bat") and "_first_run.bat" in read("Start-With-Tunnel.bat")
+    assert "-m llmop serve --tunnel --open" in read("Start-With-Tunnel.bat")
+    assert "winget install --id Cloudflare.cloudflared" in read("Start-With-Tunnel.bat")
+    worker = read("Start-Worker.bat")
+    assert "-m llmop worker init" in worker and "-m llmop worker run %*" in worker
+    client = read("Start-Client-Proxy.bat")
+    assert "-m llmop client keygen" in client and "-m llmop client proxy" in client
+    assert "-m llmop tunnel rotate-api %*" in read("Rotate-API-Link.bat")
+    first = read("_first_run.bat")
+    assert "-m llmop init %INIT_ARGS%" in first
+    assert "--backend-type" in first and "--model" in first
+
+
+def test_first_run_flags_exist():
+    from llmop.cli import build_parser
+
+    args = build_parser().parse_args(["init", "--backend-type", "lmstudio", "--model", "m"])
+    assert args.backend_type == "lmstudio" and args.model == "m"
+    for choice in ("ollama", "lmstudio", "openai"):  # the three answers of _first_run.bat
+        build_parser().parse_args(["init", "--backend-type", choice])
+
+
+def test_build_portable_pins_python_and_bundles_secure():
+    mod = _load_build_portable()
+    assert mod.PYTHON_SHA256 == "3c8b9b10a933909c98b9916297e2093b24a9c2abaa23df1c2622c2bfe052cb94"
+    assert "20251014" in mod.PYTHON_URL and "x86_64-pc-windows-msvc-install_only_stripped" in mod.PYTHON_URL
+    assert {"cryptography", "aiohttp", "websockets", "tzdata"} <= set(mod.REQUIRED)
+    assert "tzdata" in mod.WINDOWS_ONLY
+    src = (ROOT / "scripts" / "build_portable.py").read_text(encoding="utf-8")
+    assert '[secure]"' in src
+    names = {p.name for p in PORTABLE.glob("*.bat")}
+    assert set(PORTABLE_BATS) <= names
+
+
+def test_build_portable_refuses_a_wrong_python_archive(tmp_path, capsys):
+    mod = _load_build_portable()
+    fake = tmp_path / "python.tar.gz"
+    fake.write_bytes(b"not the pinned archive")
+    wheel = tmp_path / "localllm_outsider_provider-0.2.0-py3-none-any.whl"
+    wheel.write_bytes(b"")
+    out = tmp_path / "out"
+    code = mod.main(["--wheel", str(wheel), "--python-archive", str(fake), "--out", str(out)])
+    assert code == 1
+    assert "REFUSED" in capsys.readouterr().out
+    assert not out.exists() or not list(out.iterdir())

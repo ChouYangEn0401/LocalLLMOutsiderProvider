@@ -11,6 +11,17 @@
 
 閘道只看得到明文的中繼資料標頭（protected）與兩段不透明的 b64u 字串；對話內容只有 worker 解得開。
 
+**v0.2 的位置。** 閘道是 `llmop serve` 節點的一部分。本文件的路徑都接在 **API 連結**後面：
+
+| 路徑 | 完整網址（經通道 `api`） | 本機（`127.0.0.1`） |
+|---|---|---|
+| `/e2e/v1/*`（第 3 節） | `https://<api 主機>/<秘密路徑>/e2e/v1/…` | 沒有：加密面只掛在 API 連結上 |
+| `/worker/ws`（第 4 節） | `wss://<api 主機>/<秘密路徑>/worker/ws` | `ws://127.0.0.1:8781/worker/ws`（同一台機器的 worker） |
+
+`<秘密路徑>`（gate）不對的請求，在任何驗證之前就回 `404`。更換 API 連結（`llmop tunnel rotate-api`）後舊的秘密路徑失效，
+用戶端與遠端 worker 都要改用新的網址；API 金鑰、worker 註冊與釘選值都不受影響。
+同一個 API 連結底下的 `/v1/*` 是**明文直連**，不在本文件範圍。
+
 ---
 
 ## 1. 通用規則（Common rules）
@@ -35,7 +46,7 @@
 | 用戶端簽章公鑰 | 原始 32 位元組 Ed25519 公鑰的 `b64u` | |
 | `sig_key_id` | `b64u(SHA-256("LLMOP/v1/key-id/ed25519" ‖ 0x00 ‖ 原始公鑰)[:16])`，即雜湊取前 16 位元組（22 字元） | |
 | `request_id` | 16 個隨機位元組的 `b64u`（22 字元） | 由用戶端產生 |
-| API 金鑰 | `llmop_sk_` + `b64u`(32 個隨機位元組) | 閘道只存 SHA-256 的十六進位摘要 |
+| API 金鑰 | `sk-llop-` + `b64u`(32 個隨機位元組)（v0.1 的 `llmop_sk_…` 仍接受） | 閘道只存 SHA-256 的十六進位摘要 |
 | 註冊權杖 | `llmop_reg_` + `b64u`(24 個隨機位元組) | 只能用一次，1 小時後過期，雜湊後儲存 |
 | worker 權杖 | `llmop_wk_` + `b64u`(32 個隨機位元組) | 閘道存雜湊；worker 存在 `state.json` |
 | `worker_id` | `w_` + 12 個十六進位字元 | |
@@ -108,7 +119,7 @@
 | `key_id` | 字串 | 路由到持有這把金鑰的 worker；支援金鑰輪替 |
 | `sig_key_id` | 字串 | 確認簽章用的是這把 API 金鑰登記的簽章金鑰 |
 | `model` | 字串 | 確認 worker 有提供這個模型；依模型計量 |
-| `max_tokens` | 整數 | 配額准入（token 預算） |
+| `max_tokens` | 整數 | 回覆長度上限（worker 強制使用；v0.2 不再用它預扣額度） |
 
 範圍檢查：`v == 1`；`typ` 必須相符；`request_id`、`key_id`、`sig_key_id` 必須是解碼後 16 位元組的 `b64u`；
 `ts >= 0`；`model` 是 1 到 200 個字元的字串；`max_tokens` 在 1 到 1,000,000 之間。
@@ -148,7 +159,7 @@ JSON，然後依 [SECURITY.md](SECURITY.md) 的方式填充：
 - `stream` 必須不存在或為 `false`。否則 worker 回封裝起來的錯誤 `bad_request`。
 - `body` 裡的 `model` 會被忽略，worker 用 `header.model`。
 - `body` 裡的 `max_tokens` 與 `max_completion_tokens` 會被忽略，worker 用 `header.max_tokens`。
-  這樣閘道看到的配額數字才是真的。
+  這樣閘道看到的數字才是真的。
 
 ### 2.4 回覆明文
 
@@ -166,40 +177,43 @@ JSON，然後填充。只有兩種形狀：
 
 ## 3. 用戶端 ↔ 閘道的 HTTP
 
-所有 `/v1/*` 呼叫都帶 `Authorization: Bearer <API 金鑰>`。
+所有 `/e2e/v1/*` 呼叫都帶 `Authorization: Bearer <API 金鑰>`（`sk-llop-…`；v0.1 的 `llmop_sk_…` 仍接受）。
+這把金鑰必須登記了簽章公鑰（在帳號網站建立加密 key 時貼上 `llmop client keygen` 印出的 `public_key`）。
 
-### 3.1 `POST /v1/chat/completions`
+### 3.1 `POST /e2e/v1/chat/completions`
 
 本文就是第 2 節的信封。閘道依下列順序處理，遇到第一個失敗就停：
 
 1. 本文大小、JSON 形狀、解析標頭。
-2. 查 API 金鑰（且未被撤銷）。
-3. `header.sig_key_id` 等於這把 API 金鑰登記的簽章金鑰的 `sig_key_id`，且簽章驗證通過。
+2. 查 API 金鑰（存在、未撤銷、未到期；GUEST key 未用完），以及它的帳號（存在、未停用）。
+3. 這把金鑰有登記簽章公鑰；`header.sig_key_id` 等於它的 `sig_key_id`，且簽章驗證通過。
 4. `|now − ts| ≤ 300`。
 5. `(api_key_id, request_id)` 之前沒出現過。
-6. 配額：今天的請求數低於上限，且今天已用 token 數加上 `max_tokens` 不超過 token 上限。
+6. 准入：等級與兩個用量表（1.5 小時桶、每週表；GUEST 是每把 key 的總額）。用量在請求**結束後**才記帳，
+   不預扣 `max_tokens`。
 7. 有一台已連線的 worker 公告了這個 `key_id`，而且那台 worker 提供 `model`。
-8. 容量：全域進行中請求數低於 `max_inflight`，且該 worker 的待處理數低於它的上限（`8 × max_concurrency`）。
-9. 把這筆請求計入配額、轉送給 worker，最多等待 `sync_wait_seconds`。
+8. 排隊：與明文 `/v1` 共用同一個全域名額（`queue.slots`）與同一套出隊規則（等級順序、同級輪流、保底）。
+9. 排到名額後轉送給 worker；整個過程最多等待 `sync_wait_seconds`（80 秒），還沒完成就回 202。
+   worker 回報的 `usage` 寫進用量紀錄並結算到兩個用量表。只在排隊中就結束的請求不記用量。
 
 回應：
 
 | HTTP | 本文 | 意義 |
 |---|---|---|
 | 200 | `{"request_id": "…", "status": "done", "sealed": "<b64u>"}` | worker 產生了封裝好的回覆。回覆本身可能是封裝起來的錯誤。 |
-| 202 | `{"request_id": "…", "status": "pending"}` | 還在跑，請輪詢。 |
+| 202 | `{"request_id": "…", "status": "pending", "queue": {"position": 3, "eta": 40}}` | 還在排隊或還在跑，請輪詢。`queue` 只在排隊中出現。 |
 | 4xx / 5xx | `{"request_id": "…", "status": "error", "error": {"code": "…", "message": "…"}}` | 在產生封裝回覆之前就失敗，或根本沒有封裝回覆。如果連標頭都解析不了，就省略 `request_id`。 |
 
 為什麼要 202 再輪詢：Cloudflare 的邊緣節點大約 100 秒沒有回應就會切斷代理中的 HTTP 請求（錯誤 524），
 而本機推論常常超過這個時間。所以同步最多等 80 秒，之後改用輪詢。
 
-### 3.2 `GET /v1/requests/{request_id}`
+### 3.2 `GET /e2e/v1/requests/{request_id}`
 
 長輪詢，最多等 `sync_wait_seconds`。回應形狀與上面三種相同。
 只有當初送出這筆請求的 API 金鑰可以取回；其他金鑰一律得到 `404 unknown_request`。
 已完成的結果保留 600 秒，之後丟棄。
 
-### 3.3 `GET /v1/models`
+### 3.3 `GET /e2e/v1/models`
 
 每個「（模型，線上 worker 金鑰）」組合一筆：
 
@@ -215,9 +229,9 @@ JSON，然後填充。只有兩種形狀：
 
 用戶端在使用任何一筆之前，必須先拿 `public_key` 比對自己釘選的公鑰集合。
 
-### 3.4 `GET /healthz`
+### 3.4 `GET /health`
 
-回 `{"ok": true}`，不需要驗證。
+回 `{"status": "ok", "version": "…"}`，不需要驗證。每個入口都有；在 API 連結上是 `…/<秘密路徑>/health`。
 
 ### 3.5 錯誤碼
 
@@ -234,11 +248,12 @@ JSON，然後填充。只有兩種形狀：
 | `stale_timestamp` | 400 | 閘道、worker |
 | `duplicate_request` | 409 | 閘道 |
 | `replayed` | 409 | worker |
-| `quota_exceeded` | 429 | 閘道 |
+| `quota_exceeded` | 429 | 閘道（用量表見底；帶 `Retry-After`） |
+| `queue_wait` | 429 | 閘道（這個帳號排隊的請求太多，或排隊超過上限時間；帶 `Retry-After`） |
 | `unknown_key_id` | 404 | 閘道、worker |
 | `model_unavailable` | 404 | 閘道、worker |
-| `worker_busy` | 503 | 閘道 |
-| `gateway_busy` | 503 | 閘道 |
+| `worker_busy` | 503 | 閘道（v0.2 改由排隊處理，保留這個碼） |
+| `gateway_busy` | 503 | 閘道（整個佇列已滿；帶 `Retry-After`） |
 | `worker_disconnected` | 502 | 閘道 |
 | `decrypt_failed` | 400 | worker |
 | `timeout` | 504 | 閘道 |
@@ -251,7 +266,7 @@ JSON，然後填充。只有兩種形狀：
 
 ## 4. 閘道 ↔ worker 的 WebSocket
 
-worker 開啟 `GET /worker/ws`，送出文字訊框。每個訊框是一個帶 `type` 欄位的 JSON 物件。
+worker 開啟 `GET /worker/ws`（遠端：`wss://<api 主機>/<秘密路徑>/worker/ws`），送出文字訊框。每個訊框是一個帶 `type` 欄位的 JSON 物件。
 雙方都每 25 秒送一次 WebSocket ping。憑證只放在第一個訊框裡，絕不放在 URL。
 
 程式中：`protocol.parse_frame(text)` 依 `type` 嚴格檢查訊框（格式錯誤丟 `bad_envelope`，版本不對丟
@@ -284,7 +299,7 @@ worker 開啟 `GET /worker/ws`，送出文字訊框。每個訊框是一個帶 `
 - `max_concurrency` 是至少為 1 的整數；`models` 是字串陣列，每個名稱最多 200 字元。
 - 閘道會用 `public_key` 重新計算每個 `key_id`，對不上就拒絕。
 - 如果某個 `key_id` 已經記錄在另一台 worker 名下，以 `key_conflict` 拒絕。
-- 閘道把沒看過的金鑰連同 `first_seen_at` 時間存起來，管理介面會顯示。
+- 閘道把沒看過的金鑰連同 `first_seen_at` 時間存起來，本機控制台會顯示。
 - 閘道用 `models` 整個取代這台 worker 已存的模型清單。
 - 同一個 `worker_id` 的第二條連線會取代第一條；掛在舊連線上的請求以 `worker_disconnected` 失敗。
 
@@ -322,5 +337,5 @@ worker 開啟 `GET /worker/ws`，送出文字訊框。每個訊框是一個帶 `
 
 - `ok: true` 表示 worker 解開了請求並產生封裝好的回覆；那個回覆也可能是封裝起來的錯誤，此時 `usage` 兩個數字都是 0。
 - `ok: false` 只帶一個第 3.5 節表格裡的裸錯誤碼，沒有別的。worker 絕不把後端文字或請求內容放進明文訊框。
-- `usage` 刻意是明文：閘道把它加進這把金鑰當天的 token 用量。兩個數字都是非負整數，不能多也不能少欄位。
+- `usage` 刻意是明文：閘道把它記進這把金鑰（與帳號）的用量表。兩個數字都是非負整數，不能多也不能少欄位。
 - 如果 `response` 的 `request_id` 不是待處理中的請求，閘道忽略它並寫一筆紀錄。

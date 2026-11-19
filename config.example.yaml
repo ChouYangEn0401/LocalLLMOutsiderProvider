@@ -1,24 +1,40 @@
-# LocalLLMOutsiderProvider (llmop) - example config
-# Copy to config.yaml and edit:   copy config.example.yaml config.yaml   (Windows)
+# LocalLLMOutsiderProvider (llmop) v0.2 - example config
+# Easiest start:  llmop init   (or Start.bat in the Windows portable zip) creates
+# config.yaml from this file and asks for the admin password.
 # The file is re-read automatically when it changes; no restart needed for
-# accounts / quotas / backends.
+# accounts / tiers / quotas / backends / model. Ports, listeners and tunnels need a restart.
 # config.yaml is in .gitignore - never commit real password hashes.
+#
+# What runs (llmop serve):
+#   local console + key-less /v1   http://127.0.0.1:<listeners.local>      this computer only
+#   account website                http://127.0.0.1:<listeners.public_ui>  -> tunnel "ui"
+#   API link                       http://127.0.0.1:<listeners.public_api>/<secret>/v1
+#                                  (+ /<secret>/e2e/v1 encrypted, /<secret>/worker/ws) -> tunnel "api"
 
 server:
   host: 127.0.0.1          # keep 127.0.0.1; the tunnel connects locally. Docker sets 0.0.0.0.
-  port: 8780
+  port: 8780               # only for the v0.1 single-listener mode (llmop serve --port N);
+                           # the v0.2 node uses "listeners" below
   data_dir: ./data         # SQLite file (keys, sessions, usage records) lives here
-  public_url: ""           # fixed public URL (named tunnel / own domain). Empty = use quick tunnel URL
+  public_url: ""           # fixed URL of the ACCOUNT WEBSITE (named tunnel / own domain).
+                           # Empty = the quick-tunnel URL. The API link: tunnels.api.public_url
   session_minutes: 720     # web login lasts 12 hours
   cookie_secure: auto      # auto | always | never
   title: "Local LLM Outsider Provider"
+  public_stream: false     # allow "stream": true on the public API link. Off by default:
+                           # quick tunnels do not support SSE reliably. The local /v1 always streams.
+                           # Encrypted requests (/e2e/v1) never stream in v0.2.
 
 # What this machine runs: gateway (API + accounts + web), worker (decrypts next to
 # the LLM, for encrypted keys), client (local proxy that encrypts for your apps).
+# Encrypted keys on this computer:  roles: [gateway, worker]  and run once
+#   llmop worker init    (keys + settings in $LLMOP_HOME/worker; check its "backends")
+# The node then starts the worker itself. Needs: pip install "localllm-outsider-provider[secure]"
 roles: [gateway]
 
 # The one model every request uses. The "model" field of a request is always replaced
-# by this. Empty = not set.
+# by this and /v1/models lists only it. Empty = not set (requests keep their model;
+# the startup check warns). Example:  model: qwen3.5:9b
 model: ""
 
 # Local LLM servers behind the gateway. type: ollama | vllm | lmstudio | llamacpp | openai
@@ -41,11 +57,14 @@ backends:
   #   api_key: env:VLLM_API_KEY        # if vLLM was started with --api-key
   #   models: ["*"]
 
-# Optional friendly names:  "model": "fast"  ->  qwen3.5:9b
+# Optional friendly names ("model": "fast" -> qwen3.5:9b), from v0.1. Not shown in
+# v0.2 (one model, see "model" above); kept so old configs still load.
 model_aliases:
   # fast: qwen3.5:9b
 
-# Applied to every account unless the account overrides a value. 0 = unlimited.
+# v0.1 limits, applied to every account unless the account overrides a value.
+# 0 = unlimited. In v0.2 the tiers and the two usage meters below decide who may
+# send how much; requests_per_minute / max_tokens_per_request stay as safety limits.
 default_quota:
   tokens_per_day: 200000
   tokens_per_month: 3000000
@@ -56,7 +75,11 @@ default_quota:
 
 # Accounts. tier: vip3 | vip2 | vip1 | normal (default normal); any tier value
 # (bucket, weekly, max_concurrent, ...) can be overridden per account.
-# max_api_keys: default 1; 0 = this account cannot create API keys (web playground only).
+# LOW is not a tier: a NORMAL account becomes LOW by itself when its 1.5-hour bucket
+# is empty. GUEST is not an account: GUEST keys are issued in the local console.
+# max_api_keys: default 1; 0 = this account cannot create API keys.
+# Accounts log in on the account website and create their own keys there
+# (per key: encryption required | optional).
 # Create a password hash with:   llmop hash-password
 # (or: python -m llmop hash-password)
 accounts:
@@ -78,7 +101,9 @@ accounts:
   #   quota:
   #     tokens_per_day: 50000
 
-# Cloudflare tunnel (needs cloudflared: winget install --id Cloudflare.cloudflared)
+# Cloudflare tunnel, v0.1 single tunnel: used only by "llmop serve --port N" and plain
+# "llmop tunnel". The v0.2 node uses "tunnels" below.
+# (needs cloudflared: winget install --id Cloudflare.cloudflared)
 tunnel:
   enabled: false
   mode: quick              # quick = random https://xxx.trycloudflare.com (changes every start)
@@ -86,8 +111,8 @@ tunnel:
   cloudflared: cloudflared # path to cloudflared(.exe) if not on PATH
   token: ""                # mode: named -> env:CLOUDFLARE_TUNNEL_TOKEN
 
-# The local, key-less /v1 on this machine is billed to this account.
-# Empty = the first admin account.
+# The local, key-less /v1 (http://127.0.0.1:<listeners.local>/v1) is billed to this
+# account and queued with its tier. Empty = the first admin account.
 local_account: ""
 
 # Ports of the three entry points (all on 127.0.0.1).
@@ -96,15 +121,24 @@ listeners:
   public_ui: 8780          # account website (tunnel "ui")
   public_api: 8782         # API link: /<secret>/v1, /<secret>/e2e/v1, /<secret>/worker/ws (tunnel "api")
 
-# Two independent tunnels, same settings as "tunnel" above. "ui" (account website)
-# is rarely restarted; "api" can be replaced at any time ("change API link").
+# Two independent tunnels. "ui" (account website) is rarely restarted; "api" can be
+# replaced at any time ("rotate API link": llmop tunnel rotate-api, or the button in
+# the local console) without touching "ui". "llmop serve --tunnel" starts both,
+# "--no-tunnel" none. Keys per tunnel (all optional):
+#   mode: quick (random https://xxx.trycloudflare.com, changes at every start)
+#         | named (your own domain: token + public_url) | off
+#   cloudflared: path to cloudflared(.exe) if not on PATH
+#   token: env:CLOUDFLARE_TUNNEL_TOKEN_UI     (mode: named)
+#   public_url: https://llm.example.com       (mode: named; this tunnel's own URL)
 tunnels:
   ui:
     enabled: false
     mode: quick
+    public_url: ""
   api:
     enabled: false
     mode: quick
+    public_url: ""
 
 # Usage meters (docs/plan/TIERS_AND_USAGE_RULES.md). Usage is counted after each request.
 usage:
@@ -115,6 +149,10 @@ usage:
   week_reset: { weekday: sun, time: "04:00", timezone: local }   # local or e.g. Asia/Taipei
 
 # Tiers. No bucket / weekly = not limited. Leave out a tier to keep these defaults.
+# bucket = 1.5-hour meter (tokens), weekly = weekly meter, priority 1 = served first.
+# vip1 on_bucket_empty: as_normal = queue like NORMAL until the bucket is back to 25%
+# (low = become LOW like NORMAL). guest: budget = total tokens per GUEST key,
+# reset: true = the budget resets weekly instead of the key running out.
 tiers:
   vip3:   { priority: 1, max_concurrent: 3 }
   vip2:   { priority: 2, max_concurrent: 2 }
@@ -124,7 +162,8 @@ tiers:
 
 # Queue for the shared slots.
 queue:
-  slots: 6                 # must match the backend's parallel slots and context
+  slots: 6                 # requests running at once. Must match the backend's parallel
+                           # slots: llama.cpp / LM Studio split the context over them
   max_length: 30           # whole queue; more -> 503
   max_per_account: 2       # waiting requests per account; more -> 429
   max_wait_seconds: { public: 60, local: 600 }

@@ -1,4 +1,7 @@
-"""端對端：完整路徑、註冊與重新連線、配額、撤銷 API 金鑰、慢後端走 202 輪詢。"""
+"""端對端：完整路徑、註冊與重新連線、撤銷 worker、時鐘偏差、配額、撤銷 API 金鑰、慢後端走 202 輪詢。
+
+全部經過真的統一節點（三個 uvicorn）、真的 worker、真的本機代理；閘道看到的位元組都經過錄音轉送器。
+"""
 
 from __future__ import annotations
 
@@ -49,6 +52,7 @@ async def test_full_path_through_each_backend(make_stack, kind, stream):
 
     # 後端收到的是非串流請求；model 與 max_tokens 由 worker 依標頭強制指定。
     (call,) = stack.backends[kind].calls
+    assert stack.backends[kind].paths == ["/api/chat" if kind == "ollama" else "/v1/chat/completions"]
     assert call["model"] == MODELS[kind]
     assert call["stream"] is False
     assert call["messages"] == [{"role": "user", "content": "請用一句話介紹台北"}]
@@ -61,10 +65,16 @@ async def test_full_path_through_each_backend(make_stack, kind, stream):
     other = "openai" if kind == "ollama" else "ollama"
     assert stack.backends[other].calls == []
 
-    # 閘道記下了這把金鑰今天的請求數與 worker 回報的 token 數。
-    (key,) = await stack.admin.keys()
+    # 閘道記下了這把金鑰的請求數與 worker 回報的 token 數；alice 在帳號網站看得到。
     prompt_tokens, completion_tokens = FAKE_USAGE[kind]
-    assert key["today"] == {"requests": 1, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    portal = await stack.portal.portal()
+    (key,) = portal["keys"]
+    assert key["id"] == stack.client.api_key_id
+    assert key["usage"]["all"] == {"requests": 1, "total": prompt_tokens + completion_tokens}
+    assert portal["status"]["weekly"]["used"] == prompt_tokens + completion_tokens
+    (row,) = stack.state.store.recent_usage("alice")
+    assert row["key_id"] == stack.client.api_key_id
+    assert (row["prompt_tokens"], row["completion_tokens"]) == FAKE_USAGE[kind]
 
 
 async def test_proxy_lists_models_of_pinned_worker(make_stack):
@@ -79,21 +89,21 @@ async def test_proxy_lists_models_of_pinned_worker(make_stack):
 async def test_worker_registration_and_reconnect_after_restart(make_stack):
     stack = await make_stack()
 
-    # 註冊：worker 把閘道發的身分存進 state.json（0600），註冊權杖已用掉。
+    # 註冊：worker 把閘道發的身分存進 state.json（0600），註冊碼已用掉。
     state = stack.worker.state
     assert state["worker_id"] == stack.worker_id
     assert state["worker_token"].startswith("llmop_wk_")
     assert stat.S_IMODE(os.stat(stack.worker.home / "state.json").st_mode) == 0o600
-    info = await stack.admin.worker(stack.worker_id)
+    info = await stack.console.worker(stack.worker_id)
     assert info["online"] is True
     assert info["reg_expires_at"] is None
-    # 管理介面顯示的指紋（key_id）與 worker 主控台印出的相同。
-    assert info["current_key_id"] == stack.worker_keys[0]["key_id"]
-    assert [k["public_key"] for k in info["keys"]] == [stack.worker_keys[0]["public_key"]]
+    # 控制台顯示的公鑰（與指紋）與 worker 主控台印出的相同。
+    assert [(k["key_id"], k["public_key"]) for k in info["keys"]] == [
+        (stack.worker_keys[0]["key_id"], stack.worker_keys[0]["public_key"])]
     assert sorted(info["models"]) == sorted(MODELS.values())
     assert (await stack.chat(MODELS["ollama"]))[0] == 200
 
-    # 重新啟動：不帶註冊權杖，用 state.json 裡的 worker 權杖重新連上。
+    # 重新啟動：不帶註冊碼，用 state.json 裡的 worker 權杖重新連上（同一個隧道、同一個 gate）。
     await stack.worker.stop()
     await stack.wait_online(False)
     stack.worker.start()
@@ -103,7 +113,7 @@ async def test_worker_registration_and_reconnect_after_restart(make_stack):
     assert status == 200
     assert data["choices"][0]["message"]["content"] == DEFAULT_REPLY
 
-    # 註冊權杖只能用一次：另一台 worker 拿同一個權杖會被拒絕並停止。
+    # 註冊碼只能用一次：另一台 worker 拿同一個註冊碼會被拒絕並停止。
     other_home = stack.home / "another-worker"
     other_home.mkdir()
     init_keys(other_home / "keys.json")
@@ -112,19 +122,19 @@ async def test_worker_registration_and_reconnect_after_restart(make_stack):
     with pytest.raises(LinkStopped):
         await asyncio.wait_for(other.start(stack.reg_token), 10)
     assert not (other_home / "state.json").exists()
-    assert [w["id"] for w in await stack.admin.workers()] == [stack.worker_id]
+    assert [w["id"] for w in await stack.console.workers()] == [stack.worker_id]
 
 
 async def test_revoked_worker_is_cut_off_and_stops(make_stack):
     stack = await make_stack()
-    status, data = await stack.admin.call("POST", f"/workers/{stack.worker_id}/revoke")
-    assert status == 200
+    status, data = await stack.console.call("POST", f"/ui/api/admin/workers/{stack.worker_id}/revoke")
+    assert status == 200, data
     assert data["worker"]["revoked_at"] is not None
 
     # 閘道立刻切斷連線；worker 重連時被拒絕（unauthorized），不再重試而是停止。
     with pytest.raises(LinkStopped):
         await asyncio.wait_for(stack.worker.task, 10)
-    assert (await stack.admin.worker(stack.worker_id))["online"] is False
+    assert (await stack.console.worker(stack.worker_id))["online"] is False
     status, data, _ = await stack.chat(MODELS["ollama"])
     assert status == 404
     assert data["error"]["code"] == "model_unavailable"
@@ -148,22 +158,22 @@ async def test_client_clock_must_be_within_five_minutes(make_stack, monkeypatch,
     assert status == 400
     assert data["error"]["code"] == expected
     # 落後 200 秒：閘道的時間窗接受，但 worker 拒絕早於自己啟動時刻的 ts（重放防禦的開機門檻）。
-    # 這是 docs/SECURITY.md 記載的代價：worker 剛重啟後，時鐘落後的用戶端會暫時被拒絕。
+    # 這是 docs/secure/SECURITY.md 記載的代價：worker 剛重啟後，時鐘落後的用戶端會暫時被拒絕。
     assert stack.backends["ollama"].calls == []
 
 
 @pytest.mark.parametrize(
-    ("limits", "max_tokens"),
-    [({"request_limit": 1}, 77), ({"token_limit": 70}, 60)],
+    "quota",
+    [{"requests_per_day": 1}, {"tokens_per_day": sum(FAKE_USAGE["ollama"])}],
     ids=["每日請求數", "每日token數"],
 )
-async def test_quota_exceeded_in_openai_error_shape(make_stack, limits, max_tokens):
-    stack = await make_stack(**limits)
-    status, _, _ = await stack.chat(MODELS["ollama"], max_tokens=max_tokens)
+async def test_quota_exceeded_in_openai_error_shape(make_stack, quota):
+    stack = await make_stack(alice={"quota": quota})
+    status, _, _ = await stack.chat(MODELS["ollama"], max_tokens=60)
     assert status == 200
 
-    # 第二筆：請求數已達 1；或已用 16 個 token，加上 max_tokens 60 超過 70。
-    status, data, _ = await stack.chat(MODELS["ollama"], max_tokens=max_tokens)
+    # 第二筆：請求數已達 1；或已用掉 16 個 token（= 每日上限，D5：事後記帳，用完才擋）。
+    status, data, _ = await stack.chat(MODELS["ollama"], max_tokens=60)
     assert status == 429
     assert data.keys() == {"error"}
     assert data["error"]["code"] == "quota_exceeded"
@@ -176,8 +186,9 @@ async def test_revoked_api_key_is_unauthorized(make_stack):
     stack = await make_stack()
     assert (await stack.chat(MODELS["ollama"]))[0] == 200
 
-    revoked = await stack.admin.revoke_key(stack.client.api_key_id)
-    assert revoked["revoked_at"] is not None
+    # alice 在帳號網站撤銷自己的金鑰。
+    await stack.portal.revoke_key(stack.client.api_key_id)
+    assert (await stack.portal.portal())["keys"] == []
 
     # 經過代理：OpenAI 錯誤形狀的 401。
     status, data, _ = await stack.chat(MODELS["ollama"])
@@ -197,22 +208,6 @@ async def test_revoked_api_key_is_unauthorized(make_stack):
     assert len(stack.backends["ollama"].calls) == 1
 
 
-@pytest.mark.parametrize("local_only", [True, False], ids=["預設只限本機", "關閉只限本機"])
-async def test_admin_through_the_tunnel(make_stack, local_only):
-    """經過 Cloudflare 的請求都帶 Cf-Connecting-Ip；admin_local_only 為 true 時這些請求看不到管理介面。"""
-    stack = await make_stack(admin_local_only=local_only)
-    via_cloudflare = {"Cf-Connecting-Ip": "203.0.113.7", "X-Forwarded-Proto": "https"}
-    for method, path in (("GET", "/admin/"), ("POST", "/admin/api/login"), ("GET", "/admin/api/keys")):
-        async with stack.http.request(method, stack.tunnel_url + path, headers=via_cloudflare,
-                                      json={"password": "x"} if method == "POST" else None) as resp:
-            if local_only:
-                assert resp.status == 404, path
-            else:
-                assert resp.status in (200, 401), path  # 看得到；登入與 API 仍要密碼
-    # 用戶端 API 與 worker 連線不受影響。
-    assert (await stack.chat(MODELS["ollama"]))[0] == 200
-
-
 @pytest.mark.parametrize("stream", [False, True], ids=["非串流", "串流"])
 async def test_slow_backend_completes_through_202_and_polling(make_stack, stream):
     stack = await make_stack(sync_wait_seconds=0.2)
@@ -225,17 +220,23 @@ async def test_slow_backend_completes_through_202_and_polling(make_stack, stream
 
     # 隧道上看到的：POST 先得到 202，接著用同一個 request_id 輪詢，最後一次是 200。
     exchanges = stack.relay.http_exchanges()
-    ((_, post_resp),) = [(q, r) for q, r in exchanges if q.method_path == ("POST", "/v1/chat/completions")]
+    gate = stack.gate
+    ((_, post_resp),) = [(q, r) for q, r in exchanges
+                         if q.method_path == ("POST", f"/{gate}/e2e/v1/chat/completions")]
     assert post_resp.status == 202
-    request_id = json.loads(post_resp.body)["request_id"]
-    assert json.loads(post_resp.body) == {"request_id": request_id, "status": "pending"}
-    polls = [r for q, r in exchanges if q.method_path == ("GET", f"/v1/requests/{request_id}")]
+    pending = json.loads(post_resp.body)
+    request_id = pending["request_id"]
+    assert pending["status"] == "pending"
+    assert pending.keys() <= {"request_id", "status", "queue"}
+    if "queue" in pending:  # 已在處理：位置 0（v0.2 的排隊資訊）
+        assert pending["queue"]["position"] == 0
+    polls = [r for q, r in exchanges if q.method_path == ("GET", f"/{gate}/e2e/v1/requests/{request_id}")]
     assert len(polls) >= 2
     assert [r.status for r in polls[:-1]] == [202] * (len(polls) - 1)
     assert polls[-1].status == 200
     assert json.loads(polls[-1].body)["status"] == "done"
 
     if stream:
-        # 等待期間代理每隔一段時間送出註解行，讓呼叫端與中間節點知道連線還活著。
+        # 等待期間代理每隔一段時間送出註解行（有排隊資訊時是 ": queue …"），讓呼叫端知道連線還活著。
         _, comments = parse_sse(data)
-        assert ": waiting" in comments
+        assert any(c == ": waiting" or c.startswith(": queue ") for c in comments), comments

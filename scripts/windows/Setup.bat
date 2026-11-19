@@ -46,12 +46,12 @@ echo     %ROOT%
 goto :fail
 
 :install_src
-"%VENV_PY%" -m pip install --disable-pip-version-check -q -e "%ROOT%" || goto :fail
+"%VENV_PY%" -m pip install --disable-pip-version-check -q -e "%ROOT%[secure]" || goto :fail
 goto :installed
 
 :install_wheel
 echo ... installing %WHEEL%
-"%VENV_PY%" -m pip install --disable-pip-version-check -q --upgrade "%WHEEL%" || goto :fail
+"%VENV_PY%" -m pip install --disable-pip-version-check -q --upgrade "%WHEEL%[secure]" || goto :fail
 
 :installed
 "%VENV_PY%" -m llmop --version || goto :fail

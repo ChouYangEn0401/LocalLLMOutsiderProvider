@@ -1,21 +1,23 @@
-# LocalLLMOutsiderProvider
+# 加密模式（端對端加密中繼）
 
-把你自己機器上的本機 LLM（Ollama、LM Studio、vLLM）安全地提供給外部使用。
+> v0.2：加密中繼已併入 `llmop serve` 節點。本資料夾只講**加密模式**；整個產品（直連、帳號、等級、通道）先讀
+> [專案 README](../../README.md)。
 
-請求在用戶端就先加密並簽章，經過放在 Cloudflare 隧道後面的閘道（gateway）轉送給 worker；只有 worker 解得開，
-解開後交給本機的 LLM 伺服器推論，回覆再加密給當初發出請求的那個用戶端。閘道負責 API 金鑰、配額與 worker 註冊，
+請求在用戶端就先加密並簽章，經過 Cloudflare 隧道送到閘道（gateway），閘道轉給 worker；只有 worker 解得開，
+解開後交給本機的 LLM 伺服器推論，回覆再加密給當初發出請求的那個用戶端。閘道負責 API 金鑰、用量與排隊、worker 註冊，
 但從頭到尾看不到對話內容。一般的 OpenAI 相容程式不需要修改：指向用戶端這邊的本機代理就能使用。
 
 ## 三個角色
 
-- **gateway（閘道）**：唯一對外的服務，只綁 `127.0.0.1:8787`，靠 Cloudflare 隧道對外。負責 API 金鑰、每日配額、
-  worker 註冊與管理介面，並把加密過的請求轉送給 worker。它不持有任何私鑰，讀不到內容。
+- **gateway（閘道）**：`llmop serve` 節點的一部分。加密面掛在 **API 連結**底下：`https://<api 主機>/<秘密路徑>/e2e/v1/*`，
+  worker 連 `…/<秘密路徑>/worker/ws`。三個入口都只綁 `127.0.0.1`，靠 Cloudflare 隧道對外。它不持有任何私鑰，讀不到內容。
 - **worker**：跑在本機 LLM 伺服器旁邊。它主動以 WebSocket 連到閘道（自己不開任何監聽的連接埠，所以放在 NAT 後面也行），
-  驗證簽章、解開請求、呼叫本機後端推論，再把回覆加密送回。
-- **client（用戶端）**：SDK、本機 OpenAI 相容代理（`127.0.0.1:8788`）與命令列工具。負責加密與簽署請求、解開回覆。
+  驗證簽章、解開請求、呼叫本機後端推論，再把回覆加密送回。和閘道同一台機器時，在 `config.yaml` 設
+  `roles: [gateway, worker]`，節點會自己啟動它。
+- **client（用戶端外掛）**：SDK、本機 OpenAI 相容代理（`127.0.0.1:8788`）與命令列工具。負責加密與簽署請求、解開回覆。
 
 ```
-【用戶端的機器】
+【使用者的機器】
     OpenAI 相容程式（例如 SYNOX）
           │  一般的 OpenAI 請求（明文，只在本機）
           ▼
@@ -23,20 +25,21 @@
           │  加密並簽章後的信封
 ══════════╪══════════ 網際網路（HTTPS）
           ▼
-    Cloudflare 隧道 ── https://<名稱>.trycloudflare.com
-          │  只轉到閘道的連接埠
+    Cloudflare 通道 "api" ── https://<api 主機>/<秘密路徑>
+          │  只轉到 API 連結的連接埠 127.0.0.1:8782
 ══════════╪══════════
-【閘道的機器】
+【伺服器（llmop serve）】
           ▼
-    llmop gateway run ── 127.0.0.1:8787
-        /v1/*         用戶端 API（只看得到中繼資料）
-        /worker/ws    worker 的 WebSocket
-        /admin/       管理介面（預設只接受本機連線）
+    API 連結 127.0.0.1:8782
+        /<秘密路徑>/e2e/v1/*      加密 API（只看得到中繼資料）
+        /<秘密路徑>/worker/ws     遠端 worker 的 WebSocket
+        /<秘密路徑>/v1/*          明文直連（不在本文件範圍）
+    本機控制台 127.0.0.1:8781     管理（建立 worker、GUEST key、更換 API 連結）
+        /worker/ws                同一台機器的 worker
           ▲
           │  WebSocket，由 worker 主動連出
-          │  （遠端經過隧道用 wss://；同一台機器用 ws://127.0.0.1）
 ══════════╪══════════
-【worker 的機器】
+【worker（可以就是伺服器本身）】
     llmop worker run（沒有任何監聽的連接埠）
           │  明文，只走 loopback
           ▼
@@ -45,56 +48,60 @@
 
 ## 網路規則
 
-- **隧道只能指向閘道的連接埠**（`http://127.0.0.1:8787`），不可以指向任何其他服務。
+- **隧道只能指向閘道的連接埠**：通道 `api` 指向 `127.0.0.1:8782`、通道 `ui` 指向 `127.0.0.1:8780`，由 `llmop serve` 自己啟動。
+  不可以指向本機控制台（8781）或任何其他服務。
 - **本機 LLM 伺服器只讓 worker 從 loopback 連線。** worker 設定裡每個後端的 `base_url` 都必須是
   `http://127.0.0.1…`、`http://[::1]…` 或 `http://localhost…`，否則 worker 拒絕啟動，沒有例外開關。
   LLM 伺服器本身也要只聽 `127.0.0.1`（Ollama 預設如此；vLLM 請加 `--host 127.0.0.1`；LM Studio 不要開「Serve on Local Network」）。
-- 閘道只綁 loopback 位址（設定成其他位址會拒絕啟動）；worker 沒有監聽的 socket；用戶端代理只綁 `127.0.0.1`，
-  因為它沒有任何驗證。
-- worker 連遠端閘道一律用 `wss://`；只有閘道就在同一台機器時才可以用 `ws://127.0.0.1`。
+- worker 沒有監聽的 socket；用戶端代理只綁 `127.0.0.1`，因為它沒有任何驗證。
+- 遠端 worker 一律用 `wss://`；只有閘道就在同一台機器時才用 `ws://127.0.0.1:8781/worker/ws`（節點內建的 worker 自動如此）。
 
 ## 快速開始
 
-需要 Python 3.11 以上。三個角色裝的是同一個套件：
+需要 Python 3.11 以上，並裝 `secure` 附加套件（Windows 免安裝版已內含）：
 
 ```
-pip install .
+pip install "localllm-outsider-provider[secure]"
 ```
 
-以下只列出指令的骨架；每一步要確認什麼、為什麼，請看 [docs/DEPLOY.md](DEPLOY.md)。
-狀態檔都放在 `~/.llmop/<角色>/`（可用環境變數 `LLMOP_HOME` 改位置）。
+每一步要確認什麼、為什麼，請看 [DEPLOY.md](DEPLOY.md)。worker 與用戶端的狀態檔放在 `$LLMOP_HOME/<角色>/`
+（預設 `~/.llmop`；Windows 免安裝版是 `data\llmop_home`）。
 
-**1. 閘道**（對外的那台機器）
+**1. 伺服器**（對外的那台機器）
 
 ```
-llmop gateway init                                # 設定管理員密碼
-llmop gateway run                                 # 聽 127.0.0.1:8787
-cloudflared tunnel --url http://127.0.0.1:8787    # 另開一個終端機；記下印出的 https://<名稱>.trycloudflare.com
+llmop init                                        # 建立 config.yaml，設定 admin 密碼
+llmop serve --tunnel                              # 三個入口＋兩個通道
+llmop tunnel show-api                             # 印出 API 連結（加密用 …/e2e/v1）
 ```
 
-管理介面在閘道那台機器上開 `http://127.0.0.1:8787/admin/`。
+**2. worker**
 
-**2. worker**（本機 LLM 伺服器旁邊）
+同一台機器：`config.yaml` 設 `roles: [gateway, worker]`，執行一次 `llmop worker init`、確認
+`$LLMOP_HOME/worker/config.json` 的 `backends`，重新 `llmop serve`。節點會自己註冊並啟動它。
+
+另一台機器：
 
 ```
 llmop worker init                                 # 建立金鑰與設定範本，印出 key_id 與 public_key
-# 編輯 ~/.llmop/worker/config.json：gateway_url 改成 wss://<名稱>.trycloudflare.com/worker/ws，backends 指向本機後端
-llmop worker run --reg-token llmop_reg_…          # 第一次：用管理介面「建立 worker」拿到的註冊權杖
+# 編輯 config.json：gateway_url 改成 wss://<api 主機>/<秘密路徑>/worker/ws，backends 指向本機後端
+llmop worker run --reg-token llmop_reg_…          # 第一次：本機控制台「Worker 與註冊碼」拿到的註冊碼
 llmop worker run                                  # 之後每次
 ```
 
 **3. 用戶端**
 
 ```
-llmop client keygen                               # 印出簽章公鑰與 sig_key_id，交給閘道管理員
+llmop client keygen                               # 印出簽章公鑰 public_key 與 sig_key_id
 ```
 
-管理員在管理介面用這把公鑰建立 API 金鑰，把 `llmop_sk_…` 交給你。建立 `~/.llmop/client/config.json`（權限 0600）：
+到帳號網站建立 API key，「加密」選「必須加密」，貼上 `public_key`；畫面只顯示一次的 `sk-llop-…` 抄下來。
+建立 `$LLMOP_HOME/client/config.json`（權限 0600）：
 
 ```json
 {
-  "gateway_url": "https://<名稱>.trycloudflare.com",
-  "api_key": "llmop_sk_…",
+  "gateway_url": "https://<api 主機>/<秘密路徑>",
+  "api_key": "sk-llop-…",
   "pinned_workers": ["<worker 主控台印出的 public_key>"]
 }
 ```
@@ -106,10 +113,11 @@ llmop client proxy                                # 本機 OpenAI 相容代理�
 ```
 
 `pinned_workers` 一定要從 **worker 主控台**抄，不要從閘道抄；理由見下面的「安全邊界」。
+更換 API 連結後，只要改 `gateway_url` 並重新啟動代理（與遠端 worker）；API 金鑰與釘選值都不用動。
 
 ## 讓 SYNOX（或其他 OpenAI 相容程式）使用
 
-先在用戶端機器上執行 `llmop client proxy`，再把程式的本機 LLM 設定指向它。以 SYNOX 為例：
+先在使用者的機器上執行 `llmop client proxy`，再把程式的本機 LLM 設定指向它。以 SYNOX 為例：
 
 | 設定 | 值 |
 |---|---|
@@ -120,10 +128,9 @@ llmop client proxy                                # 本機 OpenAI 相容代理�
 
 - 代理沒有驗證，程式裡的 API key 欄位如果必填，隨便填一個值即可；真正的 API 金鑰與簽章金鑰在代理的設定檔裡。
 - 其他程式如果要求 base_url 含 `/v1`，就填 `http://127.0.0.1:8788/v1`。代理提供 `GET /v1/models` 與 `POST /v1/chat/completions`。
-- 程式要求 `stream: true` 也可以（SYNOX 一律如此）：閘道本身不做串流，代理會先回 SSE 標頭、等待時送註解行，
-  完成後把整則回答放在一個 chunk 裡送出，最後是 `data: [DONE]`。
-- `max_tokens`（或 `max_completion_tokens`）沒給時，用設定檔的 `default_max_tokens`（預設 1024）。這個數字會明文送到閘道，
-  用於 token 配額。
+- 程式要求 `stream: true` 也可以（SYNOX 一律如此）：v0.2 的加密面不做真串流，代理會先回 SSE 標頭、等待時送註解行，
+  完成後把整則回答放在一個 chunk 裡送出，最後是 `data: [DONE]`。真串流排在 v0.3。
+- `max_tokens`（或 `max_completion_tokens`）沒給時，用設定檔的 `default_max_tokens`（預設 1024）。這個數字會明文送到閘道。
 
 ## 安全邊界
 
@@ -133,7 +140,8 @@ llmop client proxy                                # 本機 OpenAI 相容代理�
 >
 > 以下是本系統**不**保護、也無法保護的部分：
 >
-> - **worker 機器本身。** 模型必須看到明文才能推論。能控制 worker 機器的人（或該機器上的惡意程式）看得到全部內容。請只把請求送給你信任的 worker。
+> - **直連（明文）的請求。** 送到 `/v1`（API 連結或本機入口）的請求沒有端對端加密，閘道與 Cloudflare 都看得到內容。只有經用戶端外掛送到 `/e2e/v1` 的請求受上面的保護；要讓一把 key 只能加密使用，建立時選「必須加密」（`encryption: required`）。
+> - **worker 機器本身。** 模型必須看到明文才能推論。能控制 worker 機器的人（或該機器上的惡意程式）看得到全部內容。請只把請求送給你信任的 worker。閘道與 worker 在同一台機器時（`roles: [gateway, worker]`），閘道的營運者也就看得到內容。
 > - **中繼資料。** 閘道與 Cloudflare 看得到：哪一把 API 金鑰、哪個模型、哪一台 worker、什麼時候、`max_tokens`、用掉的 token 數，以及密文大小（以 1 KiB 為單位）。
 > - **請求沒有前向保密。** 請求是用 worker 的長期公鑰加密的。若有人先錄下密文，日後又取得該 worker 的私鑰，就能解開當時錄下的請求。多輪對話的請求裡會帶著先前的回覆，所以那些回覆也會跟著曝光。回覆本身用一次性金鑰加密，單獨來看不受長期金鑰外洩影響。請定期輪替 worker 金鑰並刪除舊私鑰。
 > - **金鑰的來源。** 用戶端必須用 worker 主控台顯示的指紋來釘選公鑰。若直接相信閘道提供的公鑰，惡意的閘道可以換成自己的金鑰。
@@ -144,18 +152,17 @@ llmop client proxy                                # 本機 OpenAI 相容代理�
 
 ## 文件
 
-- [docs/DEPLOY.md](DEPLOY.md)：部署步驟——安裝、閘道與隧道、建立並註冊 worker、比對指紋與釘選、API 金鑰與簽章金鑰、
-  金鑰輪替、時鐘、管理介面的存取範圍、quick tunnel 的限制。
-- [docs/PROTOCOL.md](PROTOCOL.md)：線路協定（信封格式、HTTP API、WebSocket 訊框、錯誤碼、上限）。
-- [docs/SECURITY.md](SECURITY.md)：密碼設計、逐項的設計檢討，以及上面這段安全邊界的出處。
+- [DEPLOY.md](DEPLOY.md)：部署步驟——worker 的建立與註冊、比對指紋與釘選、加密 key 與簽章金鑰、金鑰輪替、時鐘、
+  本機控制台的存取範圍、quick tunnel 的限制。
+- [PROTOCOL.md](PROTOCOL.md)：線路協定（信封格式、`/e2e/v1` HTTP API、WebSocket 訊框、錯誤碼、上限）。
+- [SECURITY.md](SECURITY.md)：密碼設計、逐項的設計檢討，以及上面這段安全邊界的出處。
 
 ## 開發
 
 ```
-pip install -e ".[dev]"
+pip install -e ".[dev,secure]"
 pytest
 ```
 
-執行期相依套件只有 `aiohttp` 與 `cryptography`。測試分成 `tests/`（線路協定與加密）、`tests/gateway/`、`tests/worker/`、
-`tests/client/`，以及 `tests/e2e/`：在 loopback 上跑真的閘道、真的 worker、真的本機代理，加上假的 Ollama 與 OpenAI 相容後端，
-並錄下閘道收送的每一個位元組，確認裡面沒有任何對話內容。
+加密相關的測試在 `tests/secure/`、`tests/worker/`、`tests/client/` 與 `tests/e2e/`：在 loopback 上跑真的節點、真的 worker、
+真的本機代理，加上假的後端，並錄下閘道收送的每一個位元組，確認裡面沒有任何對話內容。

@@ -1,11 +1,12 @@
 @echo off
-rem Starts llmop plus a Cloudflare quick tunnel: a public https://....trycloudflare.com
-rem address, no router setup, no domain needed. The address changes every start;
-rem it is printed below, shown on the web page, and saved in data\public_url.txt.
-rem Closing this window stops both. Needs cloudflared, installed once with:
+rem Starts the whole llmop node plus TWO Cloudflare quick tunnels: one for the
+rem account website, one for the API link (https://....trycloudflare.com/<secret>/v1).
+rem No router setup, no domain needed. Quick-tunnel addresses change every start;
+rem they are printed below and shown in the local console http://127.0.0.1:8781/.
+rem Closing this window stops everything. Needs cloudflared, installed once with:
 rem   winget install --id Cloudflare.cloudflared
-rem If cloudflared lives elsewhere, set tunnel.cloudflared in config.yaml, set
-rem tunnel.enabled: true and use Start.bat instead.
+rem If cloudflared lives elsewhere, set tunnels.ui.cloudflared and
+rem tunnels.api.cloudflared in config.yaml, set enabled: true and use Start.bat.
 setlocal
 call "%~dp0_env.bat"
 if not exist "%VENV_PY%" (

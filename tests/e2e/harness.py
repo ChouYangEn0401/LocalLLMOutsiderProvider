@@ -1,15 +1,24 @@
-"""端對端測試的組件：錄音轉送器、假後端、假閘道，以及照著部署文件一步步搭起來的整套系統。
+"""端對端測試的組件：錄音轉送器、假後端、假 cloudflared、假閘道、網頁用戶端，以及整套跑起來的系統。
 
-整套系統（Stack）的樣子：
+v0.2 的整套系統（Stack）：
 
-    測試 ──HTTP──▶ 本機代理（真的）──HTTP──▶ 錄音轉送器 ──▶ 閘道（真的）
-                                                  ▲
-    假 Ollama ◀──┐                                │ WebSocket（worker 主動連出）
-    假 OpenAI ◀──┴── worker（真的）───────────────┘
+                         ┌──────────── 統一節點（真的 llmop.node.Node，三個 uvicorn）────────────┐
+    瀏覽器／管理員 ──────▶ local      127.0.0.1:<local>   本機控制台 + 免 key 的 /v1             │
+    帳號網站使用者 ──────▶ public-ui  127.0.0.1:<ui>      登入、入口網頁（自己的 key）            │
+                         │ public-api 127.0.0.1:<api>     /<gate>/v1、/<gate>/e2e/v1、/<gate>/worker/ws
+                         └──────────────────────────────▲────────────────────────────────────────┘
+                                                        │
+    測試 ──HTTP──▶ 本機代理（真的 llmop.client）──HTTP──▶ 錄音轉送器（隧道的位置）
+                                                        ▲
+    假 Ollama ◀──┐                                      │ WebSocket（worker 主動連出）
+    假 OpenAI ◀──┴── worker（真的 llmop.worker）─────────┘
 
-錄音轉送器扮演 Cloudflare 隧道的位置：用戶端與 worker 都只連它，它把位元組原封不動轉給閘道，
-同時記下閘道收到與送出的每一個位元組。WebSocket 的內容另外解框（去遮罩、解 permessage-deflate），
-因為原始位元組裡 worker 送出的訊框有遮罩、也可能被壓縮，直接搜尋字串會漏掉。
+錄音轉送器扮演 Cloudflare API 隧道的位置：用戶端與 worker 都只連它，它把位元組原封不動轉給
+public-api 入口，同時記下閘道收到與送出的每一個位元組。WebSocket 的內容另外解框（去遮罩、
+解 permessage-deflate），因為原始位元組裡 worker 送出的訊框有遮罩、也可能被壓縮。
+
+假 cloudflared（FakeCloudflared）是一個小的 HTTP 反向代理：從 127.0.0.1 連進入口，但像真的
+cloudflared 一樣加上 ``Cf-Connecting-Ip``、``X-Forwarded-*``，並把 ``Host`` 改成公開網址的主機名。
 """
 
 from __future__ import annotations
@@ -18,37 +27,54 @@ import asyncio
 import contextlib
 import json
 import re
+import socket
 import time
 import zlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from llmop import paths, protocol
+from llmop import paths, protocol, security
+from llmop.auth import SESSION_COOKIE
 from llmop.client.config import ClientConfig
 from llmop.client.proxy import make_app as make_proxy_app
-from llmop.gateway.admin import CSRF_HEADER
 from llmop.protocol import Envelope
 from llmop.worker.config import load_config as load_worker_config
 from llmop.worker.keystore import load_keys
 from llmop.worker.link import serve as serve_worker
 
-ADMIN_PASSWORD = "e2e 管理員密碼 correct horse"
+ROOT_PASSWORD = "e2e 管理員密碼 correct horse"
+ALICE_PASSWORD = "e2e alice 的密碼 battery staple"
+# scrypt 用很小的 n，測試才不會花時間在雜湊上（格式與正式的雜湊相同）。
+ROOT_HASH = security.hash_password(ROOT_PASSWORD, n=2**4)
+ALICE_HASH = security.hash_password(ALICE_PASSWORD, n=2**4)
+
 OLLAMA_MODEL = "e2e-ollama:8b"
 OPENAI_MODEL = "e2e-openai-7b"
 MODELS = {"ollama": OLLAMA_MODEL, "openai": OPENAI_MODEL}
 DEFAULT_REPLY = "這是假後端的回答。"
 # 假後端回報的 token 數（輸入, 輸出），閘道會把它們加進用量。
 FAKE_USAGE = {"ollama": (11, 5), "openai": (13, 6)}
+CSRF_HEADER = "X-CSRF-Token"
+
+# 假 cloudflared 加上的標頭（真的 cloudflared 一定會加，外面的人拿不掉）。
+CF_IP = "203.0.113.7"
 
 
 # ---------------------------------------------------------------------------
 # 小工具
 # ---------------------------------------------------------------------------
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 async def wait_until(predicate: Callable[[], object | Awaitable[object]], timeout: float = 10.0,
@@ -204,7 +230,7 @@ def ws_messages(data: bytes, *, deflate: bool) -> list[bytes]:
 
 
 # ---------------------------------------------------------------------------
-# 錄音轉送器（扮演隧道）
+# 錄音轉送器（扮演 API 隧道）
 # ---------------------------------------------------------------------------
 
 
@@ -260,7 +286,7 @@ class RecordedConnection:
 
 
 class RecordingRelay:
-    """在閘道前面的 TCP 轉送器：轉送並記錄每一條連線的雙向位元組，不改動任何內容。
+    """在 public-api 入口前面的 TCP 轉送器：轉送並記錄每一條連線的雙向位元組，不改動任何內容。
 
     retarget() 讓之後的新連線改接到另一個埠（例如假閘道）；sever_websockets() 直接中斷 worker 的連線，
     效果和隧道斷線或 worker 主機斷電時一樣（沒有 WebSocket 關閉訊框）。
@@ -287,7 +313,7 @@ class RecordingRelay:
     def sever_websockets(self) -> int:
         count = 0
         for conn in self.connections:
-            if conn.is_websocket:
+            if conn.is_websocket and conn.writers and not conn.writers[0].transport.is_closing():
                 for writer in conn.writers:
                     writer.transport.abort()
                 count += 1
@@ -301,6 +327,7 @@ class RecordingRelay:
             up_reader, up_writer = await asyncio.open_connection("127.0.0.1", self.target_port)
         except OSError:
             writer.transport.abort()
+            self._tasks.discard(asyncio.current_task())
             return
         conn.writers = [writer, up_writer]
         try:
@@ -349,11 +376,11 @@ class RecordingRelay:
         return [ex for conn in self.connections for ex in conn.http_exchanges()]
 
     def posted_envelopes(self) -> list[Envelope]:
-        """閘道從用戶端收到的每一個信封（POST /v1/chat/completions 的本文）。"""
+        """閘道從用戶端收到的每一個信封（POST /<gate>/e2e/v1/chat/completions 的本文）。"""
         return [
             Envelope.from_json(json.loads(req.body))
             for req, _ in self.http_exchanges()
-            if req.method_path == ("POST", "/v1/chat/completions")
+            if req.method_path[0] == "POST" and req.method_path[1].endswith("/e2e/v1/chat/completions")
         ]
 
     def ws_frames(self) -> tuple[list[dict], list[dict]]:
@@ -368,14 +395,71 @@ class RecordingRelay:
 
 
 # ---------------------------------------------------------------------------
+# 假 cloudflared：從 loopback 連進入口，帶上 Cloudflare 的轉送標頭與公開的 Host
+# ---------------------------------------------------------------------------
+
+_HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te",
+               "trailer", "host", "content-length"}
+
+
+class FakeCloudflared:
+    """一個 HTTP 反向代理，行為像 cloudflared：把每個請求轉給 127.0.0.1:<target_port>，
+    並加上 ``Cf-Connecting-Ip``、``Cf-Ray``、``X-Forwarded-For``、``X-Forwarded-Proto: https``，
+    ``Host`` 改成 ``public_host``。cookie 等其他標頭原樣轉送（攻擊者可以帶任何 cookie）。"""
+
+    def __init__(self, target_port: int, public_host: str) -> None:
+        self.target_port = target_port
+        self.public_host = public_host
+        self.url = ""
+        self.seen: list[tuple[str, str, int]] = []
+        self._session: aiohttp.ClientSession | None = None
+
+    def app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", self._forward)
+
+        async def session_ctx(_app):
+            async with aiohttp.ClientSession(auto_decompress=False) as session:
+                self._session = session
+                yield
+
+        app.cleanup_ctx.append(session_ctx)
+        return app
+
+    async def _forward(self, request: web.Request) -> web.Response:
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+        headers.update({
+            "Host": self.public_host,
+            "Cf-Connecting-Ip": CF_IP,
+            "Cf-Ray": "8c0ffee0e2e00000-TPE",
+            "X-Forwarded-For": CF_IP,
+            "X-Forwarded-Proto": "https",
+            "Cdn-Loop": "cloudflare",
+        })
+        body = await request.read()
+        url = f"http://127.0.0.1:{self.target_port}{request.rel_url}"
+        async with self._session.request(request.method, url, headers=headers, data=body or None,
+                                         allow_redirects=False) as resp:
+            data = await resp.read()
+            out_headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in _HOP_BY_HOP]
+            self.seen.append((request.method, request.path, resp.status))
+            response = web.Response(status=resp.status, body=data)
+            for k, v in out_headers:
+                response.headers.add(k, v)
+            return response
+
+
+# ---------------------------------------------------------------------------
 # 假的本機 LLM 後端
 # ---------------------------------------------------------------------------
 
 
 class FakeBackend:
-    """假的 Ollama（/api/tags、/api/chat）或 OpenAI 相容伺服器（/v1/models、/v1/chat/completions）。
+    """假的 Ollama（/api/tags、/api/show、/api/chat，加上 Ollama 也有的 OpenAI 相容 /v1/*）
+    或 OpenAI 相容伺服器（/v1/models、/v1/chat/completions）。
 
-    reply 是回答的文字；delay 秒後才回答（release 事件可以提早放行，測試結束時一律放行）。
+    節點（A 的後端轉接層）走 OpenAI 相容的 /v1/chat/completions；worker（B 的後端）對 Ollama 走
+    /api/chat。reply 是回答的文字；delay 秒後才回答（release 事件可以提早放行，測試結束時一律放行）。
     """
 
     def __init__(self, kind: str) -> None:
@@ -383,7 +467,9 @@ class FakeBackend:
         self.model = MODELS[kind]
         self.reply = DEFAULT_REPLY
         self.delay = 0.0
-        self.calls: list[dict] = []
+        self.usage = FAKE_USAGE[kind]
+        self.calls: list[dict] = []  # 每一筆生成請求的本文（不論路徑）
+        self.paths: list[str] = []  # 對應的路徑
         self.release = asyncio.Event()
         self.base_url = ""
 
@@ -391,14 +477,17 @@ class FakeBackend:
         app = web.Application()
         if self.kind == "ollama":
             app.router.add_get("/api/tags", self._tags)
+            app.router.add_post("/api/show", self._show)
             app.router.add_post("/api/chat", self._chat)
-        else:
-            app.router.add_get("/v1/models", self._models)
-            app.router.add_post("/v1/chat/completions", self._chat)
+        app.router.add_get("/v1/models", self._models)
+        app.router.add_post("/v1/chat/completions", self._chat)
         return app
 
     async def _tags(self, request: web.Request) -> web.Response:
         return web.json_response({"models": [{"name": self.model, "model": self.model}]})
+
+    async def _show(self, request: web.Request) -> web.Response:
+        return web.json_response({"model_info": {"llama.context_length": 8192}})
 
     async def _models(self, request: web.Request) -> web.Response:
         return web.json_response({"object": "list", "data": [{"id": self.model, "object": "model"}]})
@@ -406,11 +495,12 @@ class FakeBackend:
     async def _chat(self, request: web.Request) -> web.Response:
         payload = await request.json()
         self.calls.append(payload)
+        self.paths.append(request.path)
         if self.delay:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.release.wait(), self.delay)
-        prompt_tokens, completion_tokens = FAKE_USAGE[self.kind]
-        if self.kind == "ollama":
+        prompt_tokens, completion_tokens = self.usage
+        if request.path == "/api/chat":
             return web.json_response({
                 "model": payload["model"],
                 "created_at": "2026-11-18T00:00:00Z",
@@ -424,8 +514,9 @@ class FakeBackend:
             "id": "chatcmpl-e2e",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": payload["model"],
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": self.reply}, "finish_reason": "stop"}],
+            "model": payload.get("model", self.model),
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": self.reply},
+                         "finish_reason": "stop"}],
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                       "total_tokens": prompt_tokens + completion_tokens},
         })
@@ -437,7 +528,8 @@ class FakeBackend:
 
 
 class FakeGateway:
-    """接受任何 hello 的假 /worker/ws。扮演被入侵或冒充的閘道，把任意 request 訊框直接送給 worker。"""
+    """接受任何 hello 的假 worker 端點（任何路徑，因為 worker 連的是 /<gate>/worker/ws）。
+    扮演被入侵或冒充的閘道，把任意 request 訊框直接送給 worker。"""
 
     def __init__(self) -> None:
         self.hello: dict | None = None
@@ -446,7 +538,7 @@ class FakeGateway:
 
     def app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/worker/ws", self._handle)
+        app.router.add_get("/{tail:.*}", self._handle)
         return app
 
     async def _handle(self, request: web.Request) -> web.WebSocketResponse:
@@ -474,65 +566,119 @@ class FakeGateway:
 
 
 # ---------------------------------------------------------------------------
-# 管理介面的 API 用戶端
+# 網頁用戶端：本機控制台與帳號網站（跟網頁做的事一樣：登入、CSRF 標頭、JSON 本文）
 # ---------------------------------------------------------------------------
 
 
-class AdminClient:
-    """透過 /admin/api/* 操作閘道，跟管理介面網頁做的事一樣（登入、CSRF 標頭、JSON 本文）。"""
+class WebClient:
+    """登入某個入口（本機控制台或帳號網站）後，以 /ui/api/* 操作。"""
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
         # cookie 的網域是 IP 位址（127.0.0.1），aiohttp 預設的 cookie jar 不收，所以要 unsafe=True。
+        # 每個入口各用一個 session：瀏覽器的 cookie 不分 port，但測試要分清楚是哪個入口發的。
         self.session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         self.csrf = ""
 
     async def close(self) -> None:
         await self.session.close()
 
-    async def login(self, password: str = ADMIN_PASSWORD) -> None:
-        async with self.session.post(self.base_url + "/admin/api/login", json={"password": password}) as resp:
-            assert resp.status == 200, await resp.text()
-            self.csrf = (await resp.json())["csrf"]
+    @property
+    def session_id(self) -> str:
+        for cookie in self.session.cookie_jar:
+            if cookie.key == SESSION_COOKIE:
+                return cookie.value
+        return ""
+
+    async def login(self, username: str, password: str) -> dict:
+        async with self.session.post(self.base_url + "/ui/api/login",
+                                     json={"username": username, "password": password}) as resp:
+            data = await resp.json()
+            assert resp.status == 200, data
+        self.csrf = data["csrf"]
+        return data
 
     async def call(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         kwargs: dict = {}
         if method != "GET":
             kwargs = {"json": body or {}, "headers": {CSRF_HEADER: self.csrf}}
-        async with self.session.request(method, self.base_url + "/admin/api" + path, **kwargs) as resp:
-            return resp.status, await resp.json()
+        async with self.session.request(method, self.base_url + path, **kwargs) as resp:
+            try:
+                return resp.status, await resp.json(content_type=None)
+            except ValueError:
+                return resp.status, {"text": await resp.text()}
+
+    # -- 控制台（管理員） --------------------------------------------------
+
+    async def overview(self) -> dict:
+        status, data = await self.call("GET", "/ui/api/admin/overview")
+        assert status == 200, data
+        return data
 
     async def create_worker(self, name: str) -> tuple[dict, str]:
-        status, data = await self.call("POST", "/workers", {"name": name})
+        status, data = await self.call("POST", "/ui/api/admin/workers", {"name": name})
         assert status == 201, data
         return data["worker"], data["reg_token"]
 
     async def workers(self) -> list[dict]:
-        status, data = await self.call("GET", "/workers")
-        assert status == 200, data
-        return data["workers"]
+        return (await self.overview())["workers"]
 
     async def worker(self, worker_id: str) -> dict:
         return next(w for w in await self.workers() if w["id"] == worker_id)
 
-    async def create_key(self, name: str, sig_public_key: str, *, request_limit: int | None = None,
-                         token_limit: int | None = None) -> tuple[dict, str]:
-        status, data = await self.call("POST", "/keys", {
-            "name": name, "sig_public_key": sig_public_key,
-            "daily_request_limit": request_limit, "daily_token_limit": token_limit,
-        })
+    async def create_guest_key(self, label: str, budget_tokens: int, **extra) -> tuple[dict, str]:
+        status, data = await self.call("POST", "/ui/api/admin/guest-keys",
+                                       {"label": label, "budget_tokens": budget_tokens, **extra})
         assert status == 201, data
-        return data["key"], data["api_key"]
+        return data["record"], data["key"]
 
-    async def keys(self) -> list[dict]:
-        status, data = await self.call("GET", "/keys")
-        assert status == 200, data
-        return data["keys"]
+    # -- 帳號網站（使用者自己的 key） ------------------------------------------
 
-    async def revoke_key(self, key_id: str) -> dict:
-        status, data = await self.call("POST", f"/keys/{key_id}/revoke")
+    async def create_key(self, name: str, *, sig_public_key: str | None = None,
+                         encryption: str = "optional") -> tuple[dict, str]:
+        status, data = await self.call("POST", "/ui/api/keys", {
+            "name": name, "sig_public_key": sig_public_key, "encryption": encryption})
+        assert status == 201, data
+        return data["record"], data["key"]
+
+    async def portal(self) -> dict:
+        status, data = await self.call("GET", "/ui/api/portal")
         assert status == 200, data
-        return data["key"]
+        return data
+
+    async def revoke_key(self, key_id: str) -> None:
+        status, data = await self.call("DELETE", f"/ui/api/keys/{key_id}")
+        assert status == 200, data
+
+
+# ---------------------------------------------------------------------------
+# 假的通道（TunnelManager 的替身；不啟動 cloudflared）
+# ---------------------------------------------------------------------------
+
+
+class FakeTunnel:
+    """跟 llmop.tunnel.TunnelManager 介面相同的替身：start() 立刻拿到一個 trycloudflare 網址。"""
+
+    counter = 0
+
+    def __init__(self, settings, local_url, store=None, data_dir=None, **kw) -> None:
+        FakeTunnel.counter += 1
+        self.settings, self.local_url, self.kw = settings, local_url, kw
+        self.name = kw.get("name")
+        self.mode = settings.mode
+        self.status, self.url = "off", None
+        self.starts = self.stops = 0
+        self.host = f"{self.name}-e2e-{FakeTunnel.counter}.trycloudflare.com"
+
+    def start(self) -> bool:
+        self.starts += 1
+        self.status = "ready"
+        self.url = f"https://{self.host}"
+        return True
+
+    def stop(self, timeout: float = 15.0) -> None:
+        self.stops += 1
+        self.status, self.url = "stopped", None
 
 
 # ---------------------------------------------------------------------------
@@ -597,10 +743,12 @@ class ClientIdentity:
 class Stack:
     """一整套跑起來的系統。欄位說明見模組開頭的圖。"""
 
-    home: Path
-    gateway_url: str  # 直接連閘道（管理介面、測試直接重送封包用）
-    relay: RecordingRelay  # 隧道的位置：用戶端與 worker 都經過這裡
-    admin: AdminClient
+    node: Any  # llmop.node.Node
+    config_path: Path
+    home: Path  # LLMOP_HOME（worker／client 的檔案）
+    relay: RecordingRelay  # API 隧道的位置：用戶端與 worker 都經過這裡
+    console: WebClient  # 管理員（root）登入本機控制台
+    portal: WebClient  # alice 登入帳號網站
     backends: dict[str, FakeBackend]
     worker: WorkerRunner
     worker_id: str
@@ -610,10 +758,55 @@ class Stack:
     proxy_url: str
     http: aiohttp.ClientSession
     start_proxy: Callable[..., Awaitable[str]] = field(repr=False)
+    start_cloudflared: Callable[..., Awaitable[FakeCloudflared]] = field(repr=False)
+    restart_node: Callable[[], Awaitable[None]] = field(repr=False)
+
+    @property
+    def state(self):
+        return self.node.state
+
+    @property
+    def cfg(self):
+        return self.node.cfg
+
+    @property
+    def data_dir(self) -> Path:
+        return self.cfg.data_path
+
+    @property
+    def gate(self) -> str:
+        return self.state.api_link.gate
+
+    @property
+    def local_url(self) -> str:
+        return f"http://127.0.0.1:{self.cfg.listeners.local}"
+
+    @property
+    def ui_url(self) -> str:
+        return f"http://127.0.0.1:{self.cfg.listeners.public_ui}"
+
+    @property
+    def api_url(self) -> str:
+        """public-api 入口（直接連，不經過錄音轉送器），不含 gate。"""
+        return f"http://127.0.0.1:{self.cfg.listeners.public_api}"
+
+    @property
+    def gateway_url(self) -> str:
+        """直接連閘道的 API 連結（含 gate）；測試直接重送封包用。"""
+        return f"{self.api_url}/{self.gate}"
 
     @property
     def tunnel_url(self) -> str:
-        return self.relay.url
+        """經過錄音轉送器（隧道）的 API 連結（含 gate）。"""
+        return f"{self.relay.url}/{self.gate}"
+
+    @property
+    def hub(self):
+        return self.state.hub
+
+    def set_sync_wait(self, seconds: float) -> None:
+        """閘道同步等待 worker 的秒數（之後回 202 pending）。"""
+        self.state.secure_router.secure.sync_wait_seconds = seconds
 
     async def chat(self, model: str, prompt: str = "你好", *, proxy_url: str | None = None, stream: bool = False,
                    max_tokens: int | None = 77, **extra) -> tuple[int, object, str]:
@@ -632,13 +825,24 @@ class Stack:
     async def post_envelope(self, envelope: Envelope, *, api_key: str | None = None) -> tuple[int, dict]:
         """直接把信封 POST 給閘道（不經過代理）。"""
         headers = {"Authorization": f"Bearer {api_key or self.client.api_key}"}
-        async with self.http.post(self.gateway_url + "/v1/chat/completions", json=envelope.to_json(),
+        async with self.http.post(self.gateway_url + "/e2e/v1/chat/completions", json=envelope.to_json(),
                                   headers=headers) as resp:
             return resp.status, await resp.json()
 
+    async def plain(self, method: str, path: str, *, api_key: str, base: str | None = None,
+                    json_body: dict | None = None) -> tuple[int, dict]:
+        """明文 /v1（A 的直連面）：``base`` 預設是經過隧道的 API 連結。"""
+        headers = {"Authorization": f"Bearer {api_key}"}
+        async with self.http.request(method, (base or self.tunnel_url) + path, json=json_body,
+                                     headers=headers) as resp:
+            try:
+                return resp.status, await resp.json(content_type=None)
+            except ValueError:
+                return resp.status, {"text": await resp.text()}
+
     async def announced_keys(self) -> set[str]:
-        """閘道 /v1/models 目前公告的 worker key_id（就是用戶端看得到的）。"""
-        async with self.http.get(self.gateway_url + "/v1/models", headers=self.client.auth) as resp:
+        """閘道 /e2e/v1/models 目前公告的 worker key_id（就是用戶端看得到的）。"""
+        async with self.http.get(self.gateway_url + "/e2e/v1/models", headers=self.client.auth) as resp:
             data = await resp.json()
         return {entry["llmop"]["key_id"] for entry in data["data"]}
 
@@ -649,12 +853,12 @@ class Stack:
 
     async def wait_online(self, online: bool = True) -> None:
         async def check() -> bool:
-            return (await self.admin.worker(self.worker_id))["online"] is online
+            return (await self.console.worker(self.worker_id))["online"] is online
         await wait_until(check, what=" worker 上線" if online else " worker 離線")
 
     def gateway_files(self) -> dict[str, bytes]:
-        """閘道狀態目錄裡的每一個檔案（gateway.db 以及 SQLite 可能留下的 -journal/-wal）。"""
-        return {p.name: p.read_bytes() for p in (self.home / "gateway").iterdir() if p.is_file()}
+        """節點資料目錄裡的每一個檔案（llmop.sqlite3 以及 SQLite 可能留下的 -journal/-wal、gate 檔）。"""
+        return {p.name: p.read_bytes() for p in self.data_dir.rglob("*") if p.is_file()}
 
 
 def proxy_app(config: ClientConfig, signing_key: Ed25519PrivateKey, keepalive: float = 0.1) -> web.Application:

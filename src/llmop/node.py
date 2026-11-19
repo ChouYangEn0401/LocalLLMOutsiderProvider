@@ -81,6 +81,28 @@ def port_free(port: int, host: str = "127.0.0.1") -> tuple[bool, str]:
     return True, ""
 
 
+class _RedactWebSocketPath(logging.Filter):
+    """uvicorn logs every WebSocket handshake as ``"WebSocket <path>" [accepted]`` on
+    ``uvicorn.error`` (not controlled by ``access_log``); on the public API listener the
+    first path segment is the secret gate. Mask it like the access log does."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and '"WebSocket %s"' in record.msg \
+                and isinstance(record.args, tuple) and len(record.args) >= 2:
+            from .netguard import redact_path
+
+            args = list(record.args)
+            args[1] = redact_path(str(args[1]))
+            record.args = tuple(args)
+        return True
+
+
+def _install_log_redaction() -> None:
+    logger = logging.getLogger("uvicorn.error")
+    if not any(isinstance(f, _RedactWebSocketPath) for f in logger.filters):
+        logger.addFilter(_RedactWebSocketPath())
+
+
 def _tunnel_settings(settings: TunnelSettings, force: bool | None) -> TunnelSettings | None:
     """None = do not start this tunnel."""
     if force is False:
@@ -215,6 +237,7 @@ class Node:
             self.state = build_state(cfg)
         state = self.state
         if self.gateway:
+            _install_log_redaction()
             self._clear_stale_urls()
             forwarded = ",".join(dict.fromkeys(["127.0.0.1", "::1", *cfg.server.trusted_proxies]))
             access = bool(cfg.server.access_log)
