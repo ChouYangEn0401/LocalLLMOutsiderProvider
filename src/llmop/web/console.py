@@ -224,6 +224,62 @@ def register_console_routes(
         return JSONResponse({"ok": True, "api_link": wdata.api_link_info(state),
                              "reminder": REMOTE_WORKER_REMINDER})
 
+    # ------------------------------------------------------------------ auto-rotation timer
+    def _rotation_link():
+        link = getattr(state, "api_link", None)
+        if link is None or not hasattr(link, "rotation_info"):
+            raise WebError(503, "API 連結功能尚未啟用 (API link not available).", "unavailable")
+        return link
+
+    def _rotation_amount(value: Any, unit: Any, name: str) -> float:
+        from llmop.apilink import RotationError, to_seconds
+
+        if value is None or value == "":
+            value = 0
+        try:
+            return to_seconds(value, unit)
+        except RotationError as exc:
+            raise WebError(400, f"{name}：{exc}", "invalid_value") from None
+
+    @router.get("/ui/api/admin/api-link/rotation")
+    async def api_admin_rotation_get(request: Request):
+        _local_admin(request)
+        return JSONResponse(_rotation_link().rotation_info())
+
+    @router.post("/ui/api/admin/api-link/rotation")
+    async def api_admin_rotation_set(request: Request):
+        """Save interval + grace (number x unit; interval 0 = off); restarts the timer."""
+        from llmop.apilink import RotationError
+
+        user = mutating_admin(request)
+        data = await read_json(request)
+        link = _rotation_link()
+        interval = _rotation_amount(data.get("interval"), data.get("unit"), "更換週期")
+        grace = _rotation_amount(data.get("grace"), data.get("grace_unit", data.get("unit")),
+                                 "寬限期")
+        try:
+            info = link.set_rotation(interval, grace)
+        except RotationError as exc:
+            raise WebError(400, str(exc), "invalid_value") from None
+        log.info("api link rotation settings changed by admin=%s interval=%gs grace=%gs",
+                 user.account.username, interval, grace)
+        return JSONResponse({"ok": True, **info})
+
+    @router.post("/ui/api/admin/api-link/rotation/extend")
+    async def api_admin_rotation_extend(request: Request):
+        from llmop.apilink import RotationError
+
+        user = mutating_admin(request)
+        data = await read_json(request)
+        link = _rotation_link()
+        seconds = _rotation_amount(data.get("amount"), data.get("unit"), "延期")
+        try:
+            info = link.extend_rotation(seconds)
+        except RotationError as exc:
+            raise WebError(400, str(exc), "invalid_value") from None
+        log.info("api link rotation extended by admin=%s by %gs", user.account.username, seconds)
+        return JSONResponse({"ok": True, **info})
+
     # ------------------------------------------------------------------ raw config
     def _config_path():
         path = state.config.path

@@ -43,6 +43,29 @@ AUDIT_FILE = "api_link_audit.jsonl"
 API_URL_KV = "api_tunnel_url"  # written by the "api" TunnelManager
 RESTART_KV = "api_tunnel_restart"  # a host change requested by another process
 GATE_BYTES = 32  # 256 bits
+ROTATION_KV = "api_rotation"  # JSON {"interval": seconds, "grace": seconds} (owner's auto-rotation)
+NEXT_ROTATION_KV = "api_rotation_next"  # epoch seconds of the next automatic rotation
+ROTATION_TICK = 60.0  # how often the node checks the deadline
+UNIT_SECONDS = {"hours": 3600.0, "days": 86400.0}
+MAX_ROTATION_SECONDS = 3650 * 86400.0
+
+
+class RotationError(ValueError):
+    """A bad rotation setting; the message is shown to the owner (Traditional Chinese)."""
+
+
+def to_seconds(amount, unit) -> float:
+    """``amount`` (number, decimals ok) x ``unit`` ("hours" / "days") in seconds."""
+    if unit not in UNIT_SECONDS:
+        raise RotationError("單位必須是「小時」或「天」。")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        raise RotationError("請輸入數字。")
+    if amount != amount or amount < 0 or amount == float("inf"):
+        raise RotationError("數字不可以是負數。")
+    seconds = float(amount) * UNIT_SECONDS[unit]
+    if seconds > MAX_ROTATION_SECONDS:
+        raise RotationError("時間太長（上限 3650 天）。")
+    return seconds
 
 
 def new_gate() -> str:
@@ -216,7 +239,10 @@ class ApiLink:
     def rotate_path(self, reason: str = "", grace_seconds: float | None = None, *,
                     change_host: bool = False) -> dict:
         """Synchronous path-only rotation (also what the CLI uses)."""
-        grace = self.grace_seconds if grace_seconds is None else max(0.0, float(grace_seconds))
+        if grace_seconds is None:
+            grace = self.rotation_settings()["grace"] or self.grace_seconds
+        else:
+            grace = max(0.0, float(grace_seconds))
         with self._lock:
             return self._rotate_locked(reason=reason, change_host=change_host, grace=grace)
 
@@ -260,12 +286,96 @@ class ApiLink:
             "grace_until": grace_until or None,
         }
         self.last_rotation = {k: entry[k] for k in ("ts", "reason", "change_host", "grace_until")}
+        self._reset_timer(now)
         if audit:
             self._audit(entry)
         log.info("api link rotated: change_host=%s grace=%gs old_hash=%s… new_hash=%s…",
                  change_host, grace, (old_hash or "-")[:8], gate_hash(gate)[:8])
         return {"url": self.current_url(), "grace_until": grace_until or None,
                 "change_host": bool(change_host)}
+
+    # ------------------------------------------------------------ auto-rotation timer
+    # Settings and deadline live in the database (kv), next to the api_link row: they
+    # survive restarts, are shared with the CLI process, and apply without a restart.
+    # Every rotation (button, CLI, automatic) goes through _rotate_locked, which resets
+    # the deadline to now + interval.
+    def rotation_settings(self) -> dict:
+        try:
+            got = self.store.kv_get(ROTATION_KV)
+            data = json.loads(got[0]) if got and got[0] else {}
+            return {"interval": max(0.0, float(data.get("interval", 0))),
+                    "grace": max(0.0, float(data.get("grace", 0)))}
+        except Exception:
+            return {"interval": 0.0, "grace": 0.0}
+
+    def next_rotation_at(self) -> float | None:
+        try:
+            got = self.store.kv_get(NEXT_ROTATION_KV)
+            value = float(got[0]) if got and got[0] else 0.0
+        except Exception:
+            return None
+        return value or None
+
+    def _set_next(self, value: float | None) -> None:
+        self.store.kv_set(NEXT_ROTATION_KV, repr(float(value)) if value else "")
+
+    def _reset_timer(self, now: float) -> None:
+        interval = self.rotation_settings()["interval"]
+        try:
+            self._set_next(now + interval if interval > 0 else None)
+        except Exception as exc:
+            log.warning("api link: cannot save the rotation timer (%s)", type(exc).__name__)
+
+    def set_rotation(self, interval: float, grace: float) -> dict:
+        """Save interval and grace (seconds; interval 0 = off) and restart the timer."""
+        interval, grace = float(interval), float(grace)
+        if interval < 0 or grace < 0:
+            raise RotationError("數字不可以是負數。")
+        if interval > 0 and grace >= interval:
+            raise RotationError("舊連結的寬限期必須比更換週期短，否則會同時有三條連結有效。")
+        self.store.kv_set(ROTATION_KV, json.dumps({"interval": interval, "grace": grace}))
+        self._reset_timer(self.clock())
+        return self.rotation_info()
+
+    def extend_rotation(self, seconds: float) -> dict:
+        """Push the deadline back by ``seconds`` (from now if it is already overdue)."""
+        if self.rotation_settings()["interval"] <= 0:
+            raise RotationError("自動更換目前是關閉的，請先設定週期。")
+        if not seconds > 0:
+            raise RotationError("延期的時間必須大於 0。")
+        now = self.clock()
+        self._set_next(max(self.next_rotation_at() or now, now) + float(seconds))
+        return self.rotation_info()
+
+    def rotation_info(self) -> dict:
+        st = self.rotation_settings()
+        row = self.store.get_api_link() or {}
+        now = self.clock()
+        grace_until = float(row.get("grace_until") or 0.0)
+        return {
+            "interval_seconds": st["interval"], "grace_seconds": st["grace"],
+            "enabled": st["interval"] > 0,
+            "next_rotation_at": self.next_rotation_at() if st["interval"] > 0 else None,
+            "created_at": row.get("updated_at"),
+            "old_link_valid_until": grace_until if row.get("previous_gate_hash")
+            and now < grace_until else None,
+            "now": now,
+        }
+
+    async def rotation_tick(self) -> bool:
+        """Rotate if the deadline has passed (True if it did). Called by the node."""
+        st = self.rotation_settings()
+        if st["interval"] <= 0:
+            return False
+        now = self.clock()
+        due = self.next_rotation_at()
+        if due is None:  # settings were written by something that did not set a deadline
+            self._set_next(now + st["interval"])
+            return False
+        if now < due:
+            return False
+        await self.rotate(reason="auto rotation", grace_seconds=st["grace"])
+        return True
 
     def _audit(self, entry: dict) -> None:
         if self.data_dir is None:

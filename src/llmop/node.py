@@ -362,12 +362,23 @@ class Node:
         """Every second: pick up a gate / host change made by ``llmop tunnel rotate-api``,
         close worker connections of an expired gate and notice a listener that died."""
         link = getattr(self.state, "api_link", None)
+        last_tick = -1e18
         while not self._stop.is_set():
             try:
                 if link is not None:
                     await link.poll_requests()
             except Exception as exc:
                 log.warning("api link request failed: %s", type(exc).__name__)
+            try:
+                from .apilink import ROTATION_TICK
+
+                if link is not None and hasattr(link, "rotation_tick") \
+                        and time.monotonic() - last_tick >= ROTATION_TICK:
+                    last_tick = time.monotonic()
+                    if await link.rotation_tick():
+                        self.out("API link rotated automatically (owner's rotation timer).")
+            except Exception as exc:
+                log.warning("api link auto-rotation failed: %s", type(exc).__name__)
             try:
                 self.check_api_link()
             except Exception as exc:

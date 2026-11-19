@@ -30,6 +30,7 @@ API 連結與帳號網站網址（會變、含秘密路徑，**不寫在文件�
 3. `server.public_stream` 維持 false（quick tunnel 的 SSE 不穩）；本機 `/v1` 仍可串流。
 4. 模型 `qwen3.5-9b@q6_k`、後端 `http://localhost:1235`。
 5. 清歷史的交接（清私有字詞／filter-repo／force push）延後，未做。
+6. 自動定期更換 API 連結（本機控制台管理）：只換秘密路徑，不換主機名。quick tunnel 的主機名在 cloudflared 重啟時仍會變，所以週期只有在具名通道（named tunnel）下才準。設定（週期、寬限期）與下次更換時間都存在 DB（`kv`），儲存設定、延期、任何一次更換都會重算 `next_rotation_at`；節點每 60 秒檢查，關機錯過期限會在啟動後一分鐘內補換。
 
 ## 驗證結果
 - 單元測試：`tests/test_web_v2.py`、`tests/test_config_v2.py` 新增 7 個測試（列模型、錯誤、權限／公開入口無此路由、寫入設定保留註解、configedit 設定器）全過；兩檔共 94 過、1 敗。

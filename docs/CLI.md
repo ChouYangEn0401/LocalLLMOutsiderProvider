@@ -289,6 +289,7 @@ llmop serve --no-tunnel --log-level debug
 
 **用途**：不帶動作時，**只**跑 Cloudflare 通道，給已在另一個視窗執行的伺服器用（若 `llmop serve --tunnel` 已在跑就不要再開，兩條通道沒意義）。
 帶動作 `show-api` / `rotate-api` 則管理 API 連結。
+自動定期更換（週期、寬限期、延期、立即更換）只在本機控制台（`127.0.0.1:8781`）設定，沒有對應的 CLI 指令；`rotate-api` 同樣會讓自動更換的計時從現在重新開始。
 
 **語法**
 ```
