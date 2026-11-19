@@ -11,3 +11,4 @@
 | 檔案 | 說明 | 線上原版 |
 |---|---|---|
 | `BU_Keep_MERGE_DECISIONS_v1_legacy.html` | 整合決策板 v1（兩套實作如何運作、衝突與決策卡）。加了一條 legacy 橫幅。2026-11-19 凍結。 | https://claude.ai/artifact/4632F8pJHaVQhyTXxLjQNB（不再更動） |
+| `BU_Keep_TIERS_AND_USAGE_RULES_v1_legacy.md` | 等級（VIP III/II/I、NORMAL、LOW、GUEST）與 1.5 小時／每週用量、排隊規則 v1。2026-11-19 凍結。數字待實測調整（寫在新版）。 | 工作副本：`docs/plan/TIERS_AND_USAGE_RULES.md` |
