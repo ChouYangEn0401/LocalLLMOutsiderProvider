@@ -16,39 +16,114 @@
 
 <main class="container">
   <div id="alerts"></div>
+  <p class="notice hidden" id="readonly-note">這是外部入口的唯讀管理檢視（已遮蔽）。所有變更請在這台主機的本機控制台（127.0.0.1）操作。</p>
 
   <section class="section" aria-labelledby="h-server">
     <div class="section-head">
-      <h2 id="h-server">公開網址與服務狀態 (Public URL &amp; status)</h2>
+      <h2 id="h-server">通道與 API 連結 (Tunnels &amp; API link)</h2>
       <span class="small muted"><span id="updated"></span>
         <button class="btn small ghost" id="refresh" type="button">重新整理</button></span>
     </div>
     <div class="grid two">
-      <div class="card" id="public-card"><p class="muted">載入中…</p></div>
+      <div class="card" id="link-card"><p class="muted">載入中…</p></div>
       <div class="card" id="server-card"></div>
     </div>
   </section>
 
-  <section class="section" aria-labelledby="h-backends">
-    <div class="section-head"><h2 id="h-backends">後端 (Backends)</h2></div>
+  <section class="section" aria-labelledby="h-queue">
+    <div class="section-head"><h2 id="h-queue">名額、佇列與後端 (Slots, queue &amp; backends)</h2></div>
+    <div class="card" id="queue"></div>
     <div class="card flush"><div class="table-wrap" id="backends"></div></div>
   </section>
 
   <section class="section" aria-labelledby="h-users">
     <div class="section-head">
-      <h2 id="h-users">使用者用量 (Users)</h2>
-      <p class="small muted">帳號與額度在 config.yaml 管理，存檔後自動生效。</p>
+      <h2 id="h-users">帳號與等級 (Accounts &amp; tiers)</h2>
+      <p class="small muted">帳號、等級與數字在設定檔管理（下方「設定檔」），存檔後自動生效。</p>
     </div>
     <div class="card flush"><div class="table-wrap" id="users"></div></div>
     <p class="small muted hidden" id="orphans"></p>
   </section>
 
+  <section class="section" aria-labelledby="h-guest">
+    <div class="section-head"><h2 id="h-guest">GUEST 金鑰 (Guest keys)</h2></div>
+    <div class="card write-only">
+      <form id="guest-form" class="row-form" method="post" novalidate>
+        <div class="field grow">
+          <label for="guest-label">標籤 (label)</label>
+          <input id="guest-label" type="text" maxlength="60" autocomplete="off" placeholder="例如：活動來賓">
+        </div>
+        <div class="field">
+          <label for="guest-budget">總額 tokens</label>
+          <input id="guest-budget" type="number" min="1" step="1" inputmode="numeric" placeholder="預設">
+        </div>
+        <div class="field">
+          <label for="guest-expires">到期 (天)</label>
+          <input id="guest-expires" type="number" min="1" step="1" inputmode="numeric" placeholder="不到期">
+        </div>
+        <div class="field">
+          <label for="guest-encryption">加密</label>
+          <select id="guest-encryption">
+            <option value="optional">可不加密</option>
+            <option value="required">一定加密</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="guest-reset">每週重置</label>
+          <select id="guest-reset">
+            <option value="no">不重置</option>
+            <option value="yes">每週重置</option>
+          </select>
+        </div>
+        <button class="btn primary" type="submit">發 GUEST 金鑰</button>
+      </form>
+      <div class="field">
+        <label for="guest-sig">簽章公鑰 <small class="muted">（加密金鑰必填）</small></label>
+        <input id="guest-sig" type="text" maxlength="100" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="form-error" id="guest-error" role="alert"></p>
+      <div id="guest-new"></div>
+    </div>
+    <div class="card flush"><div class="table-wrap" id="guest-keys"></div></div>
+  </section>
+
+  <section class="section" aria-labelledby="h-workers">
+    <div class="section-head"><h2 id="h-workers">Worker 與註冊碼 (Workers)</h2></div>
+    <div class="card write-only">
+      <form id="worker-form" class="row-form" method="post" novalidate>
+        <div class="field grow">
+          <label for="worker-name">名稱 (name)</label>
+          <input id="worker-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：家裡的桌機">
+        </div>
+        <button class="btn primary" type="submit">新增 worker（產生註冊碼）</button>
+      </form>
+      <p class="form-error" id="worker-error" role="alert"></p>
+      <div id="worker-new"></div>
+    </div>
+    <div class="card flush"><div class="table-wrap" id="workers"></div></div>
+  </section>
+
   <section class="section" aria-labelledby="h-keys">
     <div class="section-head">
-      <h2 id="h-keys">所有 API 金鑰 (All API keys)</h2>
+      <h2 id="h-keys">所有帳號的 API 金鑰 (All account keys)</h2>
       <p class="small muted" id="keys-count"></p>
     </div>
     <div class="card flush"><div class="table-wrap" id="keys"></div></div>
+  </section>
+
+  <section class="section write-only hidden" aria-labelledby="h-config" id="config-section">
+    <div class="section-head">
+      <h2 id="h-config">設定檔 (config.yaml)</h2>
+      <p class="small muted">存檔前會先檢查格式；格式錯誤不會寫入。</p>
+    </div>
+    <div class="card">
+      <textarea id="config-text" rows="24" spellcheck="false" class="mono" aria-label="config.yaml"></textarea>
+      <p class="form-error" id="config-error" role="alert"></p>
+      <div class="pg-actions">
+        <button class="btn" id="config-reload" type="button">重新載入</button>
+        <button class="btn primary" id="config-save" type="button">存檔</button>
+      </div>
+    </div>
   </section>
 
   <section class="section" aria-labelledby="h-recent">

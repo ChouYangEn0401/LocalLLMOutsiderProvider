@@ -152,3 +152,84 @@ async def test_invalid_parameters_send_nothing(session, config, signing_key, fak
         await run_chat(session, config, signing_key, **kwargs)
     assert (info.value.code, info.value.status) == ("bad_request", 400)
     assert fake.posts == 0
+
+
+# ---------------------------------------------------------------------------
+# gate 路徑、/e2e/v1、key 前綴、排隊資訊
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("gateway_url", "expected"),
+    [
+        ("https://demo.example.com", "https://demo.example.com/e2e/v1/models"),
+        ("https://demo.example.com/", "https://demo.example.com/e2e/v1/models"),
+        ("https://demo.example.com/g4te-S3cret", "https://demo.example.com/g4te-S3cret/e2e/v1/models"),
+        ("https://demo.example.com/g4te-S3cret/", "https://demo.example.com/g4te-S3cret/e2e/v1/models"),
+        ("http://127.0.0.1:8782/abc", "http://127.0.0.1:8782/abc/e2e/v1/models"),
+    ],
+)
+def test_url_composes_gate_and_e2e_prefix(config, gateway_url, expected):
+    config = dataclasses.replace(config, gateway_url=gateway_url)
+    assert sdk._url(config, "/models") == expected
+
+
+async def test_chat_through_gate_path(session, signing_key, aiohttp_server):
+    from llmop.client.config import ClientConfig
+
+    from .fakes import API_KEY, FakeGateway
+
+    gate = "g4te-S3cret_x"
+    fake = FakeGateway(crypto.public_raw(signing_key))
+    fake.pending_polls = 1
+    server = await aiohttp_server(fake.app(gate=gate))
+    base = str(server.make_url("")).rstrip("/")
+    config = ClientConfig(gateway_url=f"{base}/{gate}/", api_key=API_KEY, pinned_workers=(fake.public_key,))
+    result = await run_chat(session, config, signing_key)
+    assert result["choices"][0]["message"]["content"] == REPLY_TEXT
+    assert fake.posts == 1 and fake.polls == 1
+    # 少了 gate 就找不到 API。
+    no_gate = dataclasses.replace(config, gateway_url=base)
+    with pytest.raises(ClientError):
+        await sdk.list_models(session, no_gate)
+
+
+@pytest.mark.parametrize("api_key", ["sk-llop-" + "B" * 43, "llmop_sk_" + "C" * 43])
+async def test_both_key_prefixes_work(session, signing_key, aiohttp_server, api_key):
+    from llmop.client.config import ClientConfig
+
+    from .fakes import FakeGateway
+
+    fake = FakeGateway(crypto.public_raw(signing_key), api_key=api_key)
+    server = await aiohttp_server(fake.app())
+    config = ClientConfig(
+        gateway_url=str(server.make_url("")).rstrip("/"), api_key=api_key, pinned_workers=(fake.public_key,)
+    )
+    result = await run_chat(session, config, signing_key)
+    assert result["choices"][0]["message"]["content"] == REPLY_TEXT
+
+
+async def test_on_queue_receives_pending_queue_info(session, config, signing_key, fake):
+    fake.pending_polls = 2
+    fake.queue = {"position": 3, "eta": 40, "secret": "x"}
+    seen = []
+    result = await run_chat(session, config, signing_key, on_queue=seen.append)
+    assert result["choices"][0]["message"]["content"] == REPLY_TEXT
+    assert seen and all(q == {"position": 3, "eta": 40} for q in seen)
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({}, None),
+        ({"queue": None}, None),
+        ({"queue": "3"}, None),
+        ({"queue": {"position": 3, "eta": 40}}, {"position": 3, "eta": 40}),
+        ({"queue": {"position": 2, "eta": 12.6}}, {"position": 2, "eta": 13}),
+        ({"queue": {"position": "3\n\ndata: x", "eta": True}}, None),
+        ({"queue": {"position": -1, "eta": float("nan")}}, None),
+        ({"queue": {"position": 1, "eta": float("inf")}}, {"position": 1}),
+    ],
+)
+def test_queue_info_keeps_only_integers(data, expected):
+    assert sdk.queue_info(data) == expected

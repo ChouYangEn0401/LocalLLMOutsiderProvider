@@ -41,7 +41,8 @@ def ok_reply(body: dict, header: Header) -> dict:
 
 
 class FakeGateway:
-    def __init__(self, client_sig_pub: bytes, model: str = "qwen3:8b") -> None:
+    def __init__(self, client_sig_pub: bytes, model: str = "qwen3:8b", api_key: str = API_KEY) -> None:
+        self.api_key = api_key
         self.client_sig_pub = client_sig_pub
         self.model = model
         self.worker_key = crypto.generate_worker_key()
@@ -57,6 +58,7 @@ class FakeGateway:
         self.wrong_request = False  # 用錯的 request_hash 封裝回覆
         self.drop_post = None  # "before"：POST 沒處理就回非 JSON 502；"after"：處理完才回
         self.flaky_polls = 0  # 前幾次輪詢回非 JSON 502
+        self.queue: dict | None = None  # pending 回應帶的 queue 資訊
         # 記錄
         self.received: list[tuple[Header, dict]] = []
         self.posts = 0
@@ -70,11 +72,13 @@ class FakeGateway:
             key_id = crypto.worker_key_id(b64u_decode(public_key))
         return {"id": model, "object": "model", "owned_by": "fake", "llmop": {"key_id": key_id, "public_key": public_key}}
 
-    def app(self) -> web.Application:
+    def app(self, gate: str = "") -> web.Application:
+        """gate 不為空時，API 掛在 /<gate>/e2e/v1/* 底下（模擬含 gate 路徑的 gateway_url）。"""
+        prefix = f"/{gate}/e2e/v1" if gate else "/e2e/v1"
         app = web.Application()
-        app.router.add_get("/v1/models", self._models)
-        app.router.add_post("/v1/chat/completions", self._post)
-        app.router.add_get("/v1/requests/{request_id}", self._poll)
+        app.router.add_get(f"{prefix}/models", self._models)
+        app.router.add_post(f"{prefix}/chat/completions", self._post)
+        app.router.add_get(f"{prefix}/requests/{{request_id}}", self._poll)
         return app
 
     @staticmethod
@@ -85,7 +89,7 @@ class FakeGateway:
         return web.json_response(body, status=HTTP_STATUS[code])
 
     def _authorized(self, request: web.Request) -> bool:
-        return request.headers.get("Authorization") == f"Bearer {API_KEY}"
+        return request.headers.get("Authorization") == f"Bearer {self.api_key}"
 
     async def _models(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
@@ -132,5 +136,8 @@ class FakeGateway:
 
     def _answer(self, rid: str) -> web.Response:
         if self._pending[rid] > 0:
-            return web.json_response({"request_id": rid, "status": "pending"}, status=202)
+            body = {"request_id": rid, "status": "pending"}
+            if self.queue is not None:
+                body["queue"] = self.queue
+            return web.json_response(body, status=202)
         return web.json_response({"request_id": rid, "status": "done", "sealed": self._results[rid]})

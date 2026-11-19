@@ -1,6 +1,9 @@
 """用戶端設定（client/config.json）與簽章金鑰（client/signing_key.json）。
 
 兩個檔案都在 $LLMOP_HOME/client/ 底下，權限 0600：config.json 有 API 金鑰，signing_key.json 有簽章私鑰。
+
+gateway_url 可以帶 gate 路徑（例如 https://主機/<gate>），API 路徑接在它後面：<gateway_url>/e2e/v1/…。
+gate 是秘密路徑，跟 API 金鑰一樣不寫進 log。
 """
 
 from __future__ import annotations
@@ -26,11 +29,12 @@ SIGNING_KEY_NAME = "signing_key.json"
 
 DEFAULT_PROXY_PORT = 8788
 DEFAULT_MAX_TOKENS = 1024
-API_KEY_PREFIX = "llmop_sk_"
+# 新發的 key 一律是 sk-llop-；舊的 llmop_sk_ 仍接受。
+API_KEY_PREFIXES = ("sk-llop-", "llmop_sk_")
 
 CONFIG_EXAMPLE = """{
-  "gateway_url": "https://<名稱>.trycloudflare.com",
-  "api_key": "llmop_sk_...",
+  "gateway_url": "https://<名稱>.trycloudflare.com/<gate>",
+  "api_key": "sk-llop-...",
   "pinned_workers": ["<worker 主控台印出的 X25519 公鑰（b64u）>"],
   "proxy_port": 8788,
   "default_max_tokens": 1024
@@ -86,8 +90,8 @@ class ClientConfig:
 
     def __post_init__(self) -> None:
         _check_gateway_url(self.gateway_url)
-        if not isinstance(self.api_key, str) or not self.api_key.startswith(API_KEY_PREFIX):
-            raise ConfigError(f"api_key 必須是以 {API_KEY_PREFIX} 開頭的字串")
+        if not isinstance(self.api_key, str) or not self.api_key.startswith(API_KEY_PREFIXES):
+            raise ConfigError(f"api_key 必須是以 {' 或 '.join(API_KEY_PREFIXES)} 開頭的字串")
         for key in self.pinned_workers:
             try:
                 ok = isinstance(key, str) and len(b64u_decode(key)) == 32
@@ -131,7 +135,7 @@ def _check_gateway_url(url: object) -> None:
         raise ConfigError("gateway_url 必須是字串")
     parts = urlsplit(url)
     if not parts.hostname or parts.query or parts.fragment:
-        raise ConfigError("gateway_url 必須是 https://主機 形式的網址")
+        raise ConfigError("gateway_url 必須是 https://主機 或 https://主機/<gate> 形式的網址")
     if parts.scheme == "https":
         return
     if parts.scheme == "http" and is_loopback_host(parts.hostname):

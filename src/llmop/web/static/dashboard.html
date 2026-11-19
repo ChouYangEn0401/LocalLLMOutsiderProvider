@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
-<title>儀表板 · {{title}}</title>
+<title>入口 · {{title}}</title>
 <link rel="icon" href="/ui/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/ui/static/app.css?v={{v}}">
 <script src="/ui/static/common.js?v={{v}}" defer></script>
@@ -15,31 +15,25 @@
 <header class="topbar"><div class="topbar-inner" id="topbar"></div></header>
 
 <main class="container">
-  <section class="section" aria-labelledby="h-quota">
+  <section class="section" aria-labelledby="h-status">
     <div class="section-head">
-      <h2 id="h-quota">額度 (Quota)</h2>
+      <h2 id="h-status">狀態與用量 (Status &amp; usage)</h2>
       <button class="btn small ghost" id="refresh" type="button">重新整理</button>
     </div>
-    <div class="grid stats" id="quota-cards"><div class="card stat muted">載入中…</div></div>
+    <div class="grid stats" id="status-cards"><div class="card stat muted">載入中…</div></div>
   </section>
 
-  <section class="section" aria-labelledby="h-chart">
+  <section class="section" aria-labelledby="h-link">
     <div class="section-head">
-      <h2 id="h-chart">最近 30 天 Tokens (daily usage)</h2>
-      <p class="small muted" id="chart-summary"></p>
+      <h2 id="h-link">API 連結 (API link)</h2>
+      <p class="small muted">連結可能被管理員更換；金鑰不受影響，改一下 base_url 即可。</p>
     </div>
-    <div class="card">
-      <div class="chart-wrap" id="chart"></div>
-      <details>
-        <summary>以表格檢視 (table view)</summary>
-        <div class="table-wrap" id="chart-table"></div>
-      </details>
-    </div>
+    <div class="card" id="api-link"></div>
   </section>
 
   <section class="section" aria-labelledby="h-keys">
     <div class="section-head">
-      <h2 id="h-keys">API 金鑰 (API keys)</h2>
+      <h2 id="h-keys">我的 API 金鑰 (My API keys)</h2>
       <p class="small muted" id="keys-count"></p>
     </div>
     <div class="card">
@@ -59,55 +53,34 @@
             <option value="365">1 年</option>
           </select>
         </div>
+        <div class="field">
+          <label for="key-encryption">加密 (encryption)</label>
+          <select id="key-encryption" name="encryption">
+            <option value="optional">可不加密 (optional)</option>
+            <option value="required">一定加密 (required)</option>
+          </select>
+        </div>
         <button class="btn primary" id="key-create" type="submit">申請新金鑰</button>
       </form>
+      <div class="field">
+        <label for="key-sig">簽章公鑰 (signing public key) <small class="muted">— 加密金鑰必填；用 llmop client keygen 產生</small></label>
+        <input id="key-sig" name="sig_public_key" type="text" maxlength="100" autocomplete="off" spellcheck="false"
+               placeholder="b64u，43 個字元">
+      </div>
       <p class="form-error" id="key-error" role="alert"></p>
       <div id="new-key"></div>
     </div>
     <div class="card flush"><div class="table-wrap" id="keys-table"></div></div>
   </section>
 
+  <section class="section" aria-labelledby="h-queue">
+    <div class="section-head"><h2 id="h-queue">排隊狀況 (Queue)</h2></div>
+    <div class="card" id="queue"></div>
+  </section>
+
   <section class="section" aria-labelledby="h-howto">
     <div class="section-head"><h2 id="h-howto">怎麼用 (How to use)</h2></div>
     <div class="card" id="howto"></div>
-  </section>
-
-  <section class="section" aria-labelledby="h-pg">
-    <div class="section-head">
-      <h2 id="h-pg">試玩 (Playground)</h2>
-      <p class="small muted">直接在網頁上測試模型；用量一樣計入你的額度。</p>
-    </div>
-    <div class="card">
-      <div class="pg-controls">
-        <div class="field">
-          <label for="pg-model">模型 (model)</label>
-          <select id="pg-model"><option value="">載入中…</option></select>
-        </div>
-        <div class="field">
-          <label for="pg-max">max_tokens <small class="muted">（選填 optional）</small></label>
-          <input id="pg-max" type="number" min="1" step="1" inputmode="numeric" placeholder="預設 (default)">
-        </div>
-      </div>
-      <p class="notice warn hidden" id="pg-models-error"></p>
-      <div class="chat-log" id="pg-log" aria-live="polite"></div>
-      <div class="field">
-        <label for="pg-input">訊息 (message)</label>
-        <textarea id="pg-input" rows="3" placeholder="輸入訊息… (Ctrl + Enter 送出)"></textarea>
-      </div>
-      <div class="pg-actions">
-        <span class="hint small muted" id="pg-status"></span>
-        <button class="btn" id="pg-clear" type="button">清除對話</button>
-        <button class="btn primary" id="pg-send" type="button">送出</button>
-      </div>
-    </div>
-  </section>
-
-  <section class="section" aria-labelledby="h-models">
-    <div class="section-head">
-      <h2 id="h-models">依模型 (Usage by model)</h2>
-      <p class="small muted">最近 30 天</p>
-    </div>
-    <div class="card flush"><div class="table-wrap" id="by-model"></div></div>
   </section>
 
   <section class="section" aria-labelledby="h-recent">

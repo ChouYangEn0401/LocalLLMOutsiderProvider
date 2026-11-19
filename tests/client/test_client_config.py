@@ -116,3 +116,26 @@ def test_signing_key_mismatch_rejected():
 def test_missing_signing_key_points_to_keygen():
     with pytest.raises(ConfigError, match="keygen"):
         load_signing_key()
+
+
+@pytest.mark.parametrize("api_key", ["sk-llop-" + "A" * 43, "llmop_sk_" + "A" * 43])
+def test_both_key_prefixes_accepted(api_key):
+    assert ClientConfig.from_dict(make(api_key=api_key)).api_key == api_key
+
+
+@pytest.mark.parametrize("api_key", ["sk-llop", "sk_llop_abc", "llmop-sk-abc", "SK-LLOP-abc", ""])
+def test_other_key_prefixes_rejected(api_key):
+    with pytest.raises(ConfigError):
+        ClientConfig.from_dict(make(api_key=api_key))
+
+
+@pytest.mark.parametrize(
+    ("url", "base"),
+    [
+        ("https://demo.trycloudflare.com/g4te-S3cret", "https://demo.trycloudflare.com/g4te-S3cret"),
+        ("https://demo.trycloudflare.com/g4te-S3cret/", "https://demo.trycloudflare.com/g4te-S3cret"),
+        ("http://127.0.0.1:8782/g4te", "http://127.0.0.1:8782/g4te"),
+    ],
+)
+def test_gateway_url_with_gate_path(url, base):
+    assert ClientConfig.from_dict(make(gateway_url=url)).base_url == base

@@ -5,6 +5,14 @@ Shared by the API layer (``/v1/*``) and the web playground (``key_id=None``), so
 does not depend on the incoming Request. It always returns a Response; errors are
 OpenAI-shaped. A returned streaming Response must be sent (its cleanup - usage
 record, quota lease, backend slot - runs while / after it is sent).
+
+v0.2 (DISPATCH T-6, TIERS 7.3-7.5): the configured single ``model`` replaces the
+request's ``model``; when ``state.scheduler`` exists its priority queue replaces the
+per-backend semaphore (``: queue ...`` SSE comments while a stream waits, 429 +
+``Retry-After`` when the wait is too long); after each request the usage tables are
+charged (``QuotaManager.settle`` / ``UsageManager.charge``); with ``sanitize`` the
+client never sees backend error details (they go to the log); a backend context
+overflow becomes 400 ``context_length_exceeded``.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -23,10 +32,13 @@ from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from ..backends import BackendAdapter, BackendError, ModelNotFound
-from ..backends.base import error_fields, parse_upstream_error
+from ..auth import usage_username
+from ..backends.base import context_error, error_fields, is_context_overflow, parse_upstream_error
 from ..config import Account, Config
 from ..quota import Lease, QuotaDenied
-from ..store import UsageEvent
+from ..scheduler import TIERS as QUEUE_TIERS
+from ..scheduler import QueueFull, QueueTimeout
+from ..store import ApiKey, UsageEvent
 from .errors import ApiError, openai_error
 from .sse import SSEParser
 from .tokens import chars_to_tokens, choice_chars, estimate_prompt_tokens, usage_from
@@ -41,6 +53,18 @@ MAX_TOKEN_KEYS = ("max_tokens", "max_completion_tokens")
 KEEPALIVE = b": keepalive\n\n"
 DONE = b"data: [DONE]\n\n"
 _EOF = object()
+QUEUE_NOTICE_SECONDS = 5.0  # ": queue ..." comment interval while a stream waits (TIERS 7.4)
+
+# Client-facing messages for backend failures when details must stay in the log.
+_GENERIC_ERRORS = {
+    404: "模型目前無法使用 (the model is not available right now).",
+    429: "模型伺服器忙碌中，請稍後再試 (the model server is busy; try again later).",
+    503: "模型伺服器目前無法連線 (the model server is not reachable right now).",
+    504: "模型伺服器回應逾時 (the model server timed out).",
+}
+_GENERIC_REJECTED = ("模型伺服器拒絕了這個請求，請檢查參數 "
+                     "(the model server rejected the request; check the parameters).")
+_GENERIC_FAILED = "模型伺服器發生錯誤 (the model server returned an error)."
 
 
 def json_response(data: Any, status: int = 200, headers: dict[str, str] | None = None) -> Response:
@@ -65,12 +89,55 @@ def model_permitted(account: Account, cfg: Config, requested: str, backend: str,
     return account.may_use_model(upstream) or account.may_use_model(f"{backend}/{upstream}")
 
 
+# ---------------------------------------------------------------------- errors
+def client_error(exc: BackendError, sanitize: bool, request_id: str = "") -> ApiError:
+    """``exc`` as the client sees it. With ``sanitize`` the backend's own wording
+    (and its name) only goes to the log; status, code and param are kept."""
+    if not sanitize or exc.code == "context_length_exceeded":
+        return ApiError.from_backend(exc)
+    log.warning("backend error (request %s): HTTP %s %s: %s",
+                request_id, exc.status, exc.code, exc.message)
+    if exc.status < 500 and exc.status not in _GENERIC_ERRORS:
+        message = _GENERIC_REJECTED
+    else:
+        message = _GENERIC_ERRORS.get(exc.status, _GENERIC_FAILED)
+    return ApiError(exc.status, message, exc.type, exc.code, exc.param)
+
+
+def queue_error(exc: QueueFull | QueueTimeout) -> ApiError:
+    """TIERS 7.3/7.4: waited too long -> 429 ``queue_wait``; queue full -> 503,
+    too many waiting requests of this account -> 429. Always with ``Retry-After``."""
+    wait = max(1, int(exc.retry_after))
+    headers = {"Retry-After": str(wait)}
+    if isinstance(exc, QueueTimeout):
+        pos = exc.position
+        return ApiError(429, f"目前排第 {pos} 位，約 {wait} 秒後再試 "
+                        f"(queue position {pos}, retry in ~{wait}s)",
+                        code="queue_wait", headers=headers)
+    if exc.reason == "account":
+        return ApiError(429, f"你已有太多請求在排隊，約 {wait} 秒後再試 "
+                        f"(too many of your requests are waiting, retry in ~{wait}s)",
+                        code="queue_full", headers=headers)
+    return ApiError(503, f"排隊人數已滿，約 {wait} 秒後再試 "
+                    f"(the queue is full, retry in ~{wait}s)", code="queue_full", headers=headers)
+
+
+def _body_error(adapter: BackendAdapter, obj: Any) -> BackendError:
+    """An error object the backend sent inside a 200 response / stream event."""
+    message, code, _ = error_fields(obj) or ("unknown error", None, None)
+    if is_context_overflow(message, code):
+        log.warning("backend %s: context overflow: %s", adapter.name, message)
+        return context_error(adapter.name)
+    return BackendError(502, f"Backend '{adapter.name}' error: {message}",
+                        code=code or "backend_error", backend=adapter.name)
+
+
 # ---------------------------------------------------------------------- validation
-def _validate(endpoint: str, body: Any) -> None:
+def _validate(endpoint: str, body: Any, need_model: bool = True) -> None:
     if not isinstance(body, dict):
         raise ApiError(400, "The request body must be a JSON object.", code="invalid_json")
     model = body.get("model")
-    if not isinstance(model, str) or not model.strip():
+    if need_model and (not isinstance(model, str) or not model.strip()):
         raise ApiError(400, "You must provide a model parameter.", param="model")
     if endpoint == "chat.completions" and not isinstance(body.get("messages"), list):
         raise ApiError(400, "'messages' must be a list of messages.", param="messages")
@@ -97,13 +164,17 @@ def _clamp_max_tokens(body: dict, cap: int | None) -> None:
         body["max_tokens"] = cap
 
 
-def _acquire(state: AppState, account: Account) -> Lease:
+def _acquire(state: AppState, account: Account | None, key: ApiKey | None = None) -> Lease:
     try:
+        if key is not None:
+            return state.quota.acquire(account, key)
         return state.quota.acquire(account)
     except QuotaDenied as exc:
         if exc.code == "account_disabled":
             raise ApiError(403, exc.message, code="account_disabled") from None
-        headers = dict(state.quota.headers(account))
+        if getattr(exc, "status", 429) == 401:  # dead GUEST key
+            raise ApiError(401, exc.message, code=exc.code) from None
+        headers = dict(state.quota.headers(account)) if account is not None else {}
         if exc.retry_after:
             headers["Retry-After"] = str(int(exc.retry_after))
         # OpenAI uses type "insufficient_quota" / "requests" for these two codes.
@@ -111,17 +182,32 @@ def _acquire(state: AppState, account: Account) -> Lease:
         raise ApiError(429, exc.message, type=etype, code=exc.code, headers=headers) from None
 
 
+def _queue_tier(lease: Lease, account: Account | None) -> str:
+    tier = lease.queue_tier or (getattr(account, "tier", None) if account is not None else "guest")
+    return tier if tier in QUEUE_TIERS else "normal"
+
+
 # ---------------------------------------------------------------------- bookkeeping
 class _Call:
-    """One request that holds a quota lease: owns the lease and the backend slot,
-    and writes its usage record exactly once (:meth:`finish`)."""
+    """One request that holds a quota lease: owns the lease and the backend slot
+    (or scheduler slot), and writes its usage record exactly once (:meth:`finish`)."""
 
     def __init__(
-        self, state: AppState, endpoint: str, account: Account, key_id: str | None,
+        self, state: AppState, endpoint: str, account: Account | None, key_id: str | None,
         client_ip: str, client_model: str, request_id: str, stream: bool,
-        adapter: BackendAdapter, lease: Lease, started: float,
+        adapter: BackendAdapter, lease: Lease, started: float, *,
+        key: ApiKey | None = None, zone: str | None = None, sanitize: bool = False,
     ):
         self.state = state
+        self.key = key
+        self.usage_name = usage_username(account, key)
+        self.zone = zone or "local"  # scheduler zone ("local" for the playground)
+        self.sanitize = sanitize
+        self.scheduler = getattr(state, "scheduler", None)
+        self.tier = _queue_tier(lease, account)
+        self.ticket: Any = None
+        self._slot_cm: Any = None
+        self.detail = ""  # backend error detail (for the usage record / log only)
         self.endpoint = endpoint
         self.account = account
         self.key_id = key_id
@@ -140,33 +226,90 @@ class _Call:
         self._slot = False
 
     async def acquire_slot(self) -> None:
-        await self.adapter.acquire()
+        """Wait for a slot: the global scheduler when there is one (may raise
+        QueueFull / QueueTimeout), else the backend's own semaphore."""
+        if self.scheduler is not None:
+            cm = self.scheduler.slot(self.usage_name, self.tier, self.zone)
+            self.ticket = cm.ticket
+            await cm.__aenter__()
+            self._slot_cm = cm
+            await self.adapter.acquire(gate=False)
+        else:
+            await self.adapter.acquire()
         self._slot = True
 
-    def release_slot(self) -> None:
+    async def release_slot(self) -> None:
         if self._slot:
             self._slot = False
-            self.adapter.release()
+            cm, self._slot_cm = self._slot_cm, None
+            self.adapter.release(gate=cm is None)
+            if cm is not None:
+                await cm.__aexit__(None, None, None)
+
+    def queued(self) -> bool:
+        return self.ticket is not None and self.ticket.state == "waiting"
+
+    def queue_comment(self) -> bytes:
+        """``: queue position=3 eta=40 tier=normal`` (TIERS 7.4), or a keepalive."""
+        t = self.ticket
+        pos = t.position() if t is not None else None
+        if not pos:
+            return KEEPALIVE
+        eta = math.ceil(t.eta() or 0)
+        return f": queue position={pos} eta={eta} tier={self.tier}\n\n".encode()
+
+    def api_error(self, exc: BaseException) -> ApiError | None:
+        """ApiError for a backend / queue failure (None for anything else)."""
+        if isinstance(exc, ApiError):
+            return exc
+        if isinstance(exc, (QueueFull, QueueTimeout)):
+            return queue_error(exc)
+        if isinstance(exc, BackendError):
+            self.detail = exc.message
+            return client_error(exc, self.sanitize, self.request_id)
+        return None
 
     def set_usage(self, prompt: int, completion: int, source: str) -> None:
         self.prompt_tokens, self.completion_tokens, self.usage_source = prompt, completion, source
 
     def headers(self) -> dict[str, str]:
         h = {"x-request-id": self.request_id}
+        if self.ticket is not None and self.ticket.started_at is not None:
+            h["X-LLMOP-Queue-Waited"] = f"{self.ticket.waited:.1f}"
         try:
-            h.update(self.state.quota.headers(self.account))
+            if self.account is not None:
+                h.update(self.state.quota.headers(self.account))
         except Exception:  # headers are a courtesy; never fail the request for them
             log.debug("x-ratelimit headers failed", exc_info=True)
         return h
 
-    def finish(self, status: str, error: str = "") -> None:
+    def _charge(self) -> None:
+        """Charge the usage tables after the request (TIERS 2: always afterwards)."""
+        tokens = self.prompt_tokens + self.completion_tokens
+        quota = self.state.quota
+        if getattr(quota, "tables", None) is not None:
+            quota.settle(tokens, self.account, self.key)
+            return
+        usage = getattr(self.state, "usage", None)
+        if usage is not None:
+            usage.charge(tokens, self.account, self.key)
+
+    async def finish(self, status: str, error: str = "") -> None:
         if self.finished:
             return
         self.finished = True
-        self.release_slot()
+        await self.release_slot()
+        if self.ticket is not None and self.ticket.started_at is None:
+            # Never served (left the queue, timed out, rejected): no usage (TIERS 11).
+            self.lease.release()
+            return
+        try:
+            self._charge()
+        except Exception:
+            log.exception("could not charge usage tables for request %s", self.request_id)
         try:
             self.state.store.record_usage(UsageEvent(
-                username=self.account.username,
+                username=self.usage_name,
                 endpoint=self.endpoint,
                 model=self.client_model,
                 backend=self.adapter.name,
@@ -178,7 +321,7 @@ class _Call:
                 duration_ms=int((time.monotonic() - self.started) * 1000),
                 key_id=self.key_id,
                 client_ip=self.client_ip,
-                error=error,
+                error=self.detail or error,
             ))
         except Exception:
             log.exception("could not record usage for request %s", self.request_id)
@@ -192,19 +335,31 @@ async def forward(
     endpoint: str,
     body: Any,
     *,
-    account: Account,
+    account: Account | None,
     key_id: str | None,
     client_ip: str = "",
+    key: ApiKey | None = None,
+    zone: str | None = None,
+    stream_ok: bool = True,
+    sanitize: bool | None = None,
 ) -> Response:
     """Forward an OpenAI request body to the right backend.
 
     ``endpoint`` is ``"chat.completions"``, ``"completions"`` or ``"embeddings"``.
-    ``key_id`` is None for the web playground. Never raises for request/backend
-    problems: returns an OpenAI-style error response instead.
+    ``key_id`` is None for the web playground. ``account`` is None only for a GUEST
+    ``key``. ``zone`` (``"local"`` / ``"public"``) picks the scheduler's wait limit
+    (None = legacy call, queued as ``"local"``). ``stream_ok=False`` answers
+    ``stream: true`` with the complete result as one SSE chunk (TIERS 7.5).
+    ``sanitize`` (default: ``zone`` is set) keeps backend error details out of the
+    response. Never raises for request/backend problems: returns an OpenAI-style
+    error response instead.
     """
     request_id = "req_" + secrets.token_hex(12)
+    if sanitize is None:
+        sanitize = zone is not None
     try:
-        return await _forward(state, endpoint, body, account, key_id, client_ip, request_id)
+        return await _forward(state, endpoint, body, account, key_id, client_ip, request_id,
+                              key=key, zone=zone, stream_ok=stream_ok, sanitize=sanitize)
     except ApiError as exc:
         return exc.response({"x-request-id": request_id})
     except Exception:
@@ -214,60 +369,75 @@ async def forward(
 
 
 async def _forward(
-    state: AppState, endpoint: str, body: Any, account: Account, key_id: str | None,
-    client_ip: str, request_id: str,
+    state: AppState, endpoint: str, body: Any, account: Account | None, key_id: str | None,
+    client_ip: str, request_id: str, *, key: ApiKey | None = None, zone: str | None = None,
+    stream_ok: bool = True, sanitize: bool = False,
 ) -> Response:
     if endpoint not in ENDPOINTS:
         raise ValueError(f"unknown endpoint {endpoint!r}")
+    if account is None and key is None:
+        raise ValueError("an account or a GUEST key is required")
     started = time.monotonic()
     cfg = state.config
-    _validate(endpoint, body)
+    single = (getattr(cfg, "model", "") or "").strip()
+    _validate(endpoint, body, need_model=not single)
     body = dict(body)  # we modify it; the caller's dict stays untouched
+    if single:
+        body["model"] = single  # one model for everybody (DISPATCH 3)
     model: str = body["model"]
-    stream = endpoint != "embeddings" and body.get("stream") is True
+    wants_stream = endpoint != "embeddings" and body.get("stream") is True
+    stream = wants_stream and stream_ok
 
     try:
         adapter, upstream = await state.router.resolve(model)
     except ModelNotFound as exc:
         raise ApiError(404, exc.message, code="model_not_found", param="model") from None
     except BackendError as exc:
-        raise ApiError.from_backend(exc) from None
-    if not model_permitted(account, cfg, model, adapter.name, upstream):
+        raise client_error(exc, sanitize, request_id) from None
+    if account is not None and not model_permitted(account, cfg, model, adapter.name, upstream):
         raise ApiError(403, f"Your account is not allowed to use the model '{model}'.",
                        code="model_not_allowed", param="model")
 
-    lease = _acquire(state, account)
-    call = _Call(state, endpoint, account, key_id, client_ip, model, request_id, stream,
-                 adapter, lease, started)
+    lease = _acquire(state, account, key)
+    call = _Call(state, endpoint, account, key_id, client_ip, model, request_id, wants_stream,
+                 adapter, lease, started, key=key, zone=zone, sanitize=sanitize)
     try:
         if endpoint != "embeddings":
             _clamp_max_tokens(body, lease.max_tokens)
         body["model"] = upstream
         want_usage = False
-        if stream:
+        if wants_stream:
             opts = body.get("stream_options")
             opts = dict(opts) if isinstance(opts, dict) else {}
             want_usage = opts.get("include_usage") is True
-            opts["include_usage"] = True  # we need the usage chunk for accounting
-            body["stream_options"] = opts
+            if stream:
+                opts["include_usage"] = True  # we need the usage chunk for accounting
+                body["stream_options"] = opts
+            else:  # one complete answer, sent as a single SSE chunk
+                body["stream"] = False
+                body.pop("stream_options", None)
         call.prompt_estimate = estimate_prompt_tokens(endpoint, body)
         payload = adapter.prepare_body(endpoint, body)
         if stream:
             keepalive = cfg.server.sse_keepalive
             relay = _StreamRelay(call, payload, want_usage, keepalive if keepalive > 0 else None)
             return await relay.start()
-        return await _complete(call, payload)
+        return await _complete(call, payload, as_sse=wants_stream, want_usage=want_usage)
     except BaseException as exc:
         # Not handed off to a streaming response: record and release now (idempotent).
         status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
-        call.finish(status, getattr(exc, "message", "") or type(exc).__name__)
+        await call.finish(status, getattr(exc, "message", "") or type(exc).__name__)
         raise
 
 
 # ---------------------------------------------------------------------- non-streaming
-async def _complete(call: _Call, payload: dict) -> Response:
+async def _complete(call: _Call, payload: dict, *, as_sse: bool = False,
+                    want_usage: bool = False) -> Response:
     adapter = call.adapter
-    await call.acquire_slot()
+    try:
+        await call.acquire_slot()
+    except (QueueFull, QueueTimeout) as exc:
+        raise queue_error(exc) from None
     try:
         resp = await adapter.send(call.endpoint, payload, model=payload["model"])
         try:
@@ -278,20 +448,23 @@ async def _complete(call: _Call, payload: dict) -> Response:
             with anyio.CancelScope(shield=True):
                 await resp.aclose()
     except BackendError as exc:
-        raise ApiError.from_backend(exc) from None
+        raise call.api_error(exc) from None
     finally:
-        call.release_slot()
+        await call.release_slot()
 
     try:
         data = json.loads(raw)
     except ValueError:
         data = None
     if not isinstance(data, dict):
-        raise ApiError(502, f"Backend '{adapter.name}' returned an invalid response.",
-                       code="bad_backend_response")
+        raise call.api_error(BackendError(
+            502, f"Backend '{adapter.name}' returned an invalid response.",
+            code="bad_backend_response")) from None
     if data.get("error") and not data.get("choices") and not data.get("data"):
-        message = (error_fields(data) or ("unknown error",))[0]
-        raise ApiError(502, f"Backend '{adapter.name}' error: {message}", code="backend_error")
+        err = _body_error(adapter, data)
+        if err.code != "context_length_exceeded":
+            err.code = "backend_error"
+        raise call.api_error(err) from None
 
     if "model" in data:
         data["model"] = call.client_model  # the name the client asked for
@@ -301,8 +474,42 @@ async def _complete(call: _Call, payload: dict) -> Response:
     else:
         completion = chars_to_tokens(choice_chars(call.endpoint, data.get("choices")))
         call.set_usage(call.prompt_estimate, completion, "estimate")
-    call.finish("ok")
+    await call.finish("ok")
+    if as_sse:
+        chunk = _as_chunk(call.endpoint, data)
+        if want_usage:
+            chunk["usage"] = {"prompt_tokens": call.prompt_tokens,
+                              "completion_tokens": call.completion_tokens,
+                              "total_tokens": call.prompt_tokens + call.completion_tokens}
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **call.headers()}
+        return Response(sse_event(chunk) + DONE, headers=headers, media_type="text/event-stream")
     return json_response(data, headers=call.headers())
+
+
+def _as_chunk(endpoint: str, data: dict) -> dict:
+    """A complete (non-streamed) answer as one stream chunk (TIERS 7.5: the public
+    entrance answers ``stream: true`` with the whole result at once)."""
+    chunk = {k: v for k, v in data.items() if k != "usage"}
+    if endpoint != "chat.completions":
+        return chunk  # text_completion chunks have the same shape as the full answer
+    chunk["object"] = "chat.completion.chunk"
+    choices = []
+    for i, ch in enumerate(data.get("choices") or []):
+        if not isinstance(ch, dict):
+            continue
+        msg = ch.get("message") if isinstance(ch.get("message"), dict) else {}
+        delta = {k: v for k, v in msg.items() if v is not None}
+        delta.setdefault("role", "assistant")
+        if isinstance(delta.get("tool_calls"), list):
+            delta["tool_calls"] = [{"index": j, **tc} if isinstance(tc, dict) else tc
+                                   for j, tc in enumerate(delta["tool_calls"])]
+        out = {"index": ch.get("index", i), "delta": delta,
+               "finish_reason": ch.get("finish_reason")}
+        if "logprobs" in ch:
+            out["logprobs"] = ch["logprobs"]
+        choices.append(out)
+    chunk["choices"] = choices
+    return chunk
 
 
 # ---------------------------------------------------------------------- streaming
@@ -381,13 +588,16 @@ class _StreamRelay:
                 self.call.endpoint, self.payload, model=self.payload["model"]
             )
         except BaseException:
-            self.call.release_slot()
+            await self.call.release_slot()
             raise
 
     async def start(self) -> Response:
         self.open_task = asyncio.create_task(self._open())
         try:
-            await asyncio.wait({self.open_task}, timeout=self.keepalive)
+            await asyncio.sleep(0)  # let the request enter the queue (if any)
+            if not self.call.queued():
+                await asyncio.wait({self.open_task}, timeout=self.keepalive)
+            # else: queued -> send the SSE headers now and ": queue ..." comments
         except BaseException:
             await self.close("cancelled")
             raise
@@ -395,8 +605,9 @@ class _StreamRelay:
             exc = self.open_task.exception()
             if exc is not None:
                 await self.close("error", getattr(exc, "message", "") or repr(exc))
-                if isinstance(exc, BackendError):
-                    raise ApiError.from_backend(exc)
+                err = self.call.api_error(exc)
+                if err is not None:
+                    raise err
                 raise exc
             self.upstream = self.open_task.result()
         headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **self.call.headers()}
@@ -410,10 +621,14 @@ class _StreamRelay:
         try:
             if self.upstream is None:
                 assert self.open_task is not None
+                if self.call.queued():
+                    yield self.call.queue_comment()
                 while not self.open_task.done():
-                    await asyncio.wait({self.open_task}, timeout=self.keepalive)
+                    queued = self.call.queued()
+                    await asyncio.wait({self.open_task},
+                                       timeout=QUEUE_NOTICE_SECONDS if queued else self.keepalive)
                     if not self.open_task.done():
-                        yield KEEPALIVE
+                        yield self.call.queue_comment() if self.call.queued() else KEEPALIVE
                 if self.open_task.exception() is not None:
                     yield self._fail(self.open_task.exception())
                     return
@@ -470,11 +685,7 @@ class _StreamRelay:
         if not isinstance(obj, dict):
             return sse_event(obj)
         if obj.get("error") and not obj.get("choices"):
-            message, code, _ = error_fields(obj) or ("unknown error", None, None)
-            return self._fail(BackendError(
-                502, f"Backend '{self.call.adapter.name}' error: {message}",
-                code=code or "backend_error",
-            ))
+            return self._fail(_body_error(self.call.adapter, obj))
 
         usage = usage_from(obj.get("usage"))
         if usage is not None:
@@ -498,12 +709,14 @@ class _StreamRelay:
     def _fail(self, exc: BaseException) -> bytes:
         if isinstance(exc, httpx.HTTPError):
             exc = self.call.adapter.transport_error(exc)
-        elif not isinstance(exc, BackendError):
+        elif not isinstance(exc, (BackendError, QueueFull, QueueTimeout)):
             log.error("stream %s failed", self.call.request_id, exc_info=exc)
             exc = BackendError(502, "Internal error while streaming.", code="internal_error")
-        self.status, self.error = "error", exc.message
-        return sse_event({"error": {"message": exc.message, "type": exc.type,
-                                    "param": exc.param, "code": exc.code}})
+        err = self.call.api_error(exc)
+        assert err is not None
+        self.status, self.error = "error", getattr(exc, "message", "") or str(exc)
+        return sse_event({"error": {"message": err.message, "type": err.type,
+                                    "param": err.param, "code": err.code}})
 
     def _usage_chunk(self) -> bytes:
         """Usage chunk for a client that asked for one when the backend sent none."""
@@ -546,4 +759,4 @@ class _StreamRelay:
         elif self.events or status == "ok":
             self.call.set_usage(self.call.prompt_estimate, chars_to_tokens(self.completion_chars),
                                 "estimate")
-        self.call.finish(status, error)
+        await self.call.finish(status, error)

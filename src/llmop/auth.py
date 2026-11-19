@@ -28,8 +28,29 @@ class AuthError(Exception):
 
 @dataclass
 class ApiCaller:
-    account: Account
+    """``account`` is None for a GUEST key (TIERS 8: a key without an account)."""
+
+    account: Account | None
     key: ApiKey
+
+    @property
+    def is_guest(self) -> bool:
+        return self.account is None
+
+    @property
+    def usage_name(self) -> str:
+        """Name written to ``usage_events.username`` (GUEST: ``guest:<key id>``)."""
+        return usage_username(self.account, self.key)
+
+
+def usage_username(account: Account | None, key: ApiKey | None) -> str:
+    """``usage_events.username`` for a request. GUEST keys have no account row, so
+    their usage is logged under ``guest:<key id>`` (no schema change needed)."""
+    if account is not None:
+        return account.username
+    if key is not None:
+        return f"guest:{key.id}"
+    raise ValueError("an account or a key is required")
 
 
 @dataclass
@@ -93,7 +114,29 @@ def extract_api_key(request: Request) -> str | None:
     return token or None
 
 
-def authenticate_api(request: Request, cfg: Config, store: Store) -> ApiCaller:
+def _dead_guest_key(store: Store, plaintext: str) -> AuthError | None:
+    """A clear 401 for a known GUEST key that is revoked or expired (TIERS 8)."""
+    lookup = getattr(store, "lookup_api_key", None)
+    rec = lookup(plaintext) if lookup is not None else None
+    if rec is None or not rec.is_guest or rec.username:
+        return None
+    if rec.revoked_at is not None:
+        return AuthError("此 key 已被撤銷 (this API key has been revoked).", code="key_revoked")
+    if rec.expires_at is not None:
+        return AuthError("此 key 已到期 (this API key has expired).", code="key_expired")
+    return None
+
+
+def authenticate_api(
+    request: Request, cfg: Config, store: Store, *, allow_guest: bool = False, usage=None,
+) -> ApiCaller:
+    """The caller of an API request.
+
+    ``allow_guest``: accept GUEST keys (no account; ``ApiCaller.account`` is None).
+    Off by default so callers that need an account never see None. ``usage`` (a
+    :class:`llmop.usage.UsageManager`) lets a GUEST key whose budget is used up for
+    good be refused here with 401 ``key_exhausted``.
+    """
     key = extract_api_key(request)
     if not key:
         raise AuthError(
@@ -102,7 +145,17 @@ def authenticate_api(request: Request, cfg: Config, store: Store) -> ApiCaller:
         )
     rec = store.find_api_key(key)
     if rec is None:
-        raise AuthError("Invalid or revoked API key.")
+        raise _dead_guest_key(store, key) or AuthError("Invalid or revoked API key.")
+    if not rec.username:  # GUEST key: no account row
+        if not allow_guest:
+            raise AuthError("GUEST keys cannot be used here.", code="guest_not_allowed",
+                            status=403)
+        if usage is not None:
+            status = usage.status(None, rec).get("guest") or {}
+            if status.get("status") == "exhausted":
+                raise AuthError("此 key 的總額已用完 (this API key's budget is used up).",
+                                code="key_exhausted")
+        return ApiCaller(account=None, key=rec)
     account = cfg.account(rec.username)
     if account is None:
         raise AuthError("The account for this API key no longer exists.")

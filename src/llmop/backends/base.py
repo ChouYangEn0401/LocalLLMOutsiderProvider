@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -122,6 +123,29 @@ def parse_upstream_error(text: str) -> tuple[str, str | None, str | None]:
     return fields or (text.strip()[:500], None, None)
 
 
+# Context overflow (docs/plan/TODO.md T1): LM Studio "Context size has been exceeded.",
+# llama.cpp "exceeds the available context size" (exceed_context_size_error), vLLM
+# "maximum context length is N tokens", OpenAI code "context_length_exceeded".
+_CONTEXT_RE = re.compile(
+    r"context[ _-]?(size|length|window)|exceed_context|maximum context|\bn_ctx\b", re.I)
+CONTEXT_MESSAGE = (
+    "對話內容超過模型的 context 長度，請縮短對話歷史後再試 "
+    "(the conversation exceeds the model's context length; shorten the history and retry)."
+)
+
+
+def is_context_overflow(message: str | None, code: str | None = None) -> bool:
+    """Does an upstream error say the prompt does not fit the model's context?"""
+    if code and _CONTEXT_RE.search(str(code)):
+        return True
+    return bool(message and _CONTEXT_RE.search(message))
+
+
+def context_error(backend: str = "") -> BackendError:
+    return BackendError(400, CONTEXT_MESSAGE, code="context_length_exceeded",
+                        param="messages", backend=backend)
+
+
 def _int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
@@ -197,13 +221,17 @@ class BackendAdapter:
         return httpx.Timeout(LIST_TIMEOUT, connect=self.config.connect_timeout)
 
     # ------------------------------------------------------------ concurrency
-    async def acquire(self) -> None:
-        await self.semaphore.acquire()
+    async def acquire(self, *, gate: bool = True) -> None:
+        """Take a backend slot. ``gate=False`` only counts the call as active: the
+        caller already holds a slot of the global scheduler (llmop.scheduler)."""
+        if gate:
+            await self.semaphore.acquire()
         self.active += 1
 
-    def release(self) -> None:
+    def release(self, *, gate: bool = True) -> None:
         self.active -= 1
-        self.semaphore.release()
+        if gate:
+            self.semaphore.release()
 
     # ------------------------------------------------------------ errors
     def transport_error(self, exc: BaseException) -> BackendError:
@@ -229,6 +257,9 @@ class BackendAdapter:
         """Translate an upstream HTTP error status + body."""
         message, code, param = parse_upstream_error(text)
         message = message or f"HTTP {status}"
+        if status not in (401, 403, 404, 429) and is_context_overflow(message, code):
+            log.warning("backend %s: context overflow (HTTP %s): %s", self.name, status, message)
+            return context_error(self.name)
         if status in (401, 403):
             # Not the client's fault: our own backends[].api_key is wrong / missing.
             return BackendError(

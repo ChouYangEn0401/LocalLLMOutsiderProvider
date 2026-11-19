@@ -1,15 +1,32 @@
-"""Web UI layer: login, dashboard (usage, quota, API keys, playground) and admin.
+"""Web UI layer: login, the account portal (tier, usage tables, own API keys, API
+link, queue) and the admin pages.
 
 Everything here authenticates with the session cookie only — never with API keys
 (the ``/v1`` API layer is the opposite). Pages are plain HTML files from
 ``web/static/`` driven by vanilla JS that talks to the JSON endpoints under
 ``/ui/api/``.
 
+Surfaces (``build_web_router(state, surface)``, DISPATCH section 3):
+
+* ``"public"`` — the account website behind tunnel #1. Login, the portal, the user's
+  own keys (create / revoke / ``encryption`` / signing public key). Admin data is
+  **GET only and masked**; no admin write route is registered at all, no
+  playground, no raw config.
+* ``"local"`` — the console on ``127.0.0.1``. Everything above plus accounts and
+  tiers, GUEST keys, workers and enrolment tokens, slots / backends, tunnels and
+  "rotate API link", bucket refill and raw config editing. Every request must pass
+  :func:`llmop.netguard.is_local`; admin writes additionally need a session that
+  was created on this surface (``sessions.origin == "local"``).
+* ``None`` (the default, v0.1 call signature ``build_web_router(state)``) — the
+  v0.1 combined UI kept for backward compatibility: the local feature set plus the
+  v0.1 playground / model list, without the ``is_local`` gate (v0.1 had a single
+  listener). New code must pass ``surface`` explicitly.
+
 Security model:
 
 * Session cookie ``HttpOnly; SameSite=Lax; Path=/`` (+ ``Secure`` on https or when
   ``server.cookie_secure: always``). Only ``sha256(session id)`` is stored.
-* Every state-changing request (POST/DELETE, except login) needs the header
+* Every state-changing request (POST/PUT/PATCH/DELETE, except login) needs the header
   ``X-CSRF-Token`` equal to the session's token, and a present ``Origin`` header
   must match the host the request was sent to.
 * Login: JSON only, Origin-checked, throttled per IP and per username, constant
@@ -32,16 +49,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from .. import __version__, auth, security
+from .. import __version__, auth, netguard, security
 from ..config import Account, Config
 from ..quota import month_start, utc_offset_seconds
 from ..store import ApiKey
+from . import data as wdata
 from .throttle import LoginThrottle
 
 log = logging.getLogger("llmop.web")
@@ -75,6 +93,7 @@ _STATIC_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
 PAGES = {"login": "login.html", "dashboard": "dashboard.html", "admin": "admin.html"}
 
 MAX_BODY = 1_000_000  # bytes, JSON bodies of the UI API (playground included)
+SURFACES = ("local", "public")
 MAX_KEY_NAME = 60
 MAX_EXPIRES_DAYS = 3650
 PLAYGROUND_ROLES = ("system", "user", "assistant")
@@ -243,21 +262,12 @@ def _local_midnight(d: date) -> float:
 
 
 def _key_json(k: ApiKey, now: float | None = None) -> dict:
-    now = time.time() if now is None else now
-    return {
-        "id": k.id,
-        "name": k.name,
-        "display": k.display,
-        "created_at": k.created_at,
-        "last_used_at": k.last_used_at,
-        "expires_at": k.expires_at,
-        "revoked_at": k.revoked_at,
-        "active": k.active,
-        "expired": k.expires_at is not None and k.expires_at <= now,
-    }
+    return wdata.key_json(k, now)
 
 
-def _usage_rows(rows: list[dict], key_labels: dict[str, str], *, with_user: bool) -> list[dict]:
+def _usage_rows(rows: list[dict], key_labels: dict[str, str], *, with_user: bool,
+                masked: bool = False) -> list[dict]:
+    """``masked`` (public surface): no client IP and no backend error text."""
     out = []
     for r in rows:
         key_id = r.get("key_id")
@@ -282,6 +292,10 @@ def _usage_rows(rows: list[dict], key_labels: dict[str, str], *, with_user: bool
         }
         if with_user:
             item["username"] = r.get("username")
+        if masked:
+            item.pop("client_ip", None)
+            item.pop("backend", None)
+            item["error"] = "error" if item["error"] else ""
         out.append(item)
     return out
 
@@ -381,10 +395,31 @@ def _read_static(name: str) -> tuple[bytes, str] | None:
 
 
 # --------------------------------------------------------------------------- router
-def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRouter:
-    """``state`` is a :class:`llmop.app.AppState`. ``throttle`` is injectable for tests."""
-    router = APIRouter(route_class=_UIRoute, include_in_schema=False)
+def build_web_router(state, surface: str | None = None, *,
+                     throttle: LoginThrottle | None = None) -> APIRouter:
+    """``state`` is a :class:`llmop.app.AppState`; ``surface`` is ``"local"``,
+    ``"public"`` or None (v0.1 combined UI, see the module docstring).
+    ``throttle`` is injectable for tests."""
+    if surface is not None and surface not in SURFACES:
+        raise ValueError(f"surface must be one of {SURFACES} (or None)")
+    mode = surface or "legacy"
+    public = mode == "public"
+    admin_writes = not public  # local + legacy
+
+    dependencies = []
+    if mode == "local":
+        async def local_only(request: Request) -> None:
+            # Exactly one place decides "local": netguard. A tunnel or proxy pointed at
+            # this listener (forwarding headers, foreign Host) gets nothing at all.
+            if not netguard.is_local(request):
+                raise WebError(403, "本機控制台只接受這台電腦直接連線 (local console only).",
+                               "local_only")
+        dependencies.append(Depends(local_only))
+
+    router = APIRouter(route_class=_UIRoute, include_in_schema=False,
+                       dependencies=dependencies)
     throttle = throttle or LoginThrottle()
+    session_origin = {"local": "local", "public": "remote"}.get(mode, "")
 
     def current_user(request: Request) -> auth.WebUser | None:
         return auth.web_user(request, state.config, state.store)
@@ -404,11 +439,21 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
     def mutating_user(request: Request, *, admin: bool = False) -> auth.WebUser:
         user = require_admin(request) if admin else require_user(request)
         _check_csrf(request, user, state.public_url())
+        if admin and mode == "local" and getattr(user.session, "origin", "") != "local":
+            # A session from the account website (cookies are shared across ports on
+            # 127.0.0.1) never writes here; log in on the console itself.
+            raise WebError(403, "請在本機控制台重新登入後再操作 (log in on the local console).",
+                           "local_session_required")
         return user
 
+    def can_admin_write(user: auth.WebUser) -> bool:
+        if not admin_writes or not user.account.is_admin:
+            return False
+        return mode != "local" or getattr(user.session, "origin", "") == "local"
+
     def cookie_secure(request: Request, cfg: Config) -> bool:
-        mode = cfg.server.cookie_secure
-        return mode == "always" or (mode == "auto" and auth.is_https(request))
+        mode_ = cfg.server.cookie_secure
+        return mode_ == "always" or (mode_ == "auto" and auth.is_https(request))
 
     def page(name: str) -> HTMLResponse:
         got = _read_static(PAGES[name])
@@ -480,7 +525,7 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
         wait = throttle.retry_after(ip, username)
         if wait:
             minutes = max(1, (wait + 59) // 60)
-            log.warning("login throttled user=%r ip=%s", username[:64], ip)
+            log.warning("login throttled user=%s ip=%s", netguard.clean_log(username, 64), ip)
             raise WebError(
                 429,
                 f"登入失敗次數過多，請約 {minutes} 分鐘後再試 (too many failed logins).",
@@ -499,7 +544,7 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
             ok = await run_in_threadpool(security.verify_password, password,
                                          account.password_hash)
         if not ok or account is None:
-            log.warning("login failed user=%r ip=%s", username[:64], ip)
+            log.warning("login failed user=%s ip=%s", netguard.clean_log(username, 64), ip)
             raise WebError(401, "帳號或密碼錯誤 (wrong username or password).",
                            "invalid_credentials")
         throttle.forgive(ip, username)
@@ -513,8 +558,9 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
         state.store.purge_expired_sessions()
         ttl = max(1, int(cfg.server.session_minutes)) * 60
         sid, sess = state.store.create_session(
-            account.username, ttl, ip=ip, user_agent=request.headers.get("user-agent", ""))
-        log.info("login ok user=%s ip=%s", account.username, ip)
+            account.username, ttl, ip=ip, user_agent=request.headers.get("user-agent", ""),
+            origin=session_origin)
+        log.info("login ok user=%s ip=%s surface=%s", account.username, ip, mode)
         resp = JSONResponse({
             "ok": True,
             "username": account.username,
@@ -556,7 +602,36 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
             "title": cfg.server.title,
             "version": __version__,
             "server_time": time.time(),
+            "surface": mode,
+            "tier": getattr(acc, "tier", "normal"),
+            "model": getattr(cfg, "model", ""),
+            "can_admin_write": can_admin_write(user),
+            "playground": mode == "legacy",
             **_public_url_info(state, cfg),
+        })
+
+    # ------------------------------------------------------------------ portal
+    @router.get("/ui/api/portal")
+    async def api_portal(request: Request):
+        """Everything the portal page shows (TIERS 10): tier, status, both usage
+        tables, per-key usage, the current API link and the queue."""
+        user = require_user(request)
+        cfg = state.config
+        acc = user.account
+        keys = state.store.list_api_keys(acc.username)
+        usage_map = wdata.key_usage_map(state, keys)
+        now = time.time()
+        return JSONResponse({
+            "username": acc.username,
+            "tier": getattr(acc, "tier", "normal"),
+            "model": getattr(cfg, "model", ""),
+            "status": wdata.usage_status(state, acc),
+            "keys": [dict(_key_json(k, now), usage=usage_map.get(k.id)) for k in keys],
+            "active_count": sum(1 for k in keys if k.active),
+            "max_api_keys": acc.max_api_keys,
+            "api_link": wdata.api_link_info(state),
+            "queue": wdata.queue_info(state, acc.username),
+            "server_time": now,
         })
 
     # ------------------------------------------------------------------ usage
@@ -594,18 +669,34 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
             "by_day": by_day,
             "by_model": state.store.usage_by_model(acc.username, since),
             "recent": _usage_rows(state.store.recent_usage(acc.username, 50), labels,
-                                  with_user=False),
+                                  with_user=False, masked=public),
         })
 
     # ------------------------------------------------------------------ API keys
+    def _encryption_value(value: Any, default: str | None) -> str | None:
+        if value is None or value == "":
+            return default
+        if value not in ("optional", "required"):
+            raise WebError(400, "encryption 必須是 optional 或 required.", "invalid_value")
+        return value
+
+    def _sig_value(value: Any) -> str | None:
+        try:
+            return wdata.valid_sig_public_key(value)
+        except ValueError:
+            raise WebError(400, "簽章公鑰必須是 32 位元組 Ed25519 公鑰的 b64u "
+                                "(sig_public_key must be a b64u Ed25519 public key).",
+                           "invalid_sig_public_key") from None
+
     @router.get("/ui/api/keys")
     async def api_keys_list(request: Request):
         user = require_user(request)
         acc = user.account
         keys = state.store.list_api_keys(acc.username)
+        usage_map = wdata.key_usage_map(state, keys)
         now = time.time()
         return JSONResponse({
-            "keys": [_key_json(k, now) for k in keys],
+            "keys": [dict(_key_json(k, now), usage=usage_map.get(k.id)) for k in keys],
             "active_count": sum(1 for k in keys if k.active),
             "max_api_keys": acc.max_api_keys,
         })
@@ -626,6 +717,12 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
         if not name:
             name = datetime.now().strftime("key-%Y%m%d-%H%M")
         expires_days = _opt_int(data.get("expires_days"), "expires_days", 1, MAX_EXPIRES_DAYS)
+        encryption = _encryption_value(data.get("encryption"), "optional")
+        sig = _sig_value(data.get("sig_public_key"))
+        if encryption == "required" and not sig:
+            raise WebError(400, "加密的金鑰需要貼上簽章公鑰 (llmop client keygen 產生) "
+                                "(an encrypted key needs a signing public key).",
+                           "sig_public_key_required")
 
         limit = int(acc.max_api_keys or 0)
         if limit <= 0:
@@ -638,14 +735,42 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
                 "max_api_keys",
             )
         expires_at = time.time() + expires_days * 86400 if expires_days else None
-        key, rec = state.store.create_api_key(acc.username, name, expires_at)
-        log.info("api key created user=%s id=%s", acc.username, rec.id)
+        key, rec = state.store.create_api_key(acc.username, name, expires_at,
+                                              sig_public_key=sig, encryption=encryption)
+        log.info("api key created user=%s id=%s encryption=%s", acc.username, rec.id, encryption)
         return JSONResponse({
             "ok": True,
             "key": key,
             "record": _key_json(rec),
             "warning": "完整金鑰只會顯示這一次，請立即複製保存 (shown only once).",
         }, status_code=201)
+
+    @router.patch("/ui/api/keys/{key_id}")
+    async def api_keys_update(request: Request, key_id: str):
+        """The owner changes a key's ``encryption`` and / or signing public key."""
+        user = mutating_user(request)
+        data = await _read_json(request)
+        if not data.keys() <= {"encryption", "sig_public_key"} or not data:
+            raise WebError(400, "只能修改 encryption 與 sig_public_key.", "invalid_value")
+        rec = state.store.get_api_key(key_id)
+        if rec is None or rec.username != user.account.username or not rec.active:
+            raise WebError(404, "找不到這把金鑰，或已經撤銷 (key not found).", "not_found")
+        changes: dict[str, Any] = {}
+        if "encryption" in data:
+            changes["encryption"] = _encryption_value(data["encryption"], None) or rec.encryption
+        if "sig_public_key" in data:
+            changes["sig_public_key"] = _sig_value(data["sig_public_key"])
+        final_enc = changes.get("encryption", rec.encryption)
+        final_sig = changes.get("sig_public_key", rec.sig_public_key)
+        if final_enc == "required" and not final_sig:
+            raise WebError(400, "加密的金鑰需要簽章公鑰 (an encrypted key needs a signing "
+                                "public key).", "sig_public_key_required")
+        updated = state.store.update_api_key(key_id, changes, username=user.account.username)
+        if updated is None:  # pragma: no cover - raced with a delete
+            raise WebError(404, "找不到這把金鑰 (key not found).", "not_found")
+        log.info("api key updated user=%s id=%s fields=%s", user.account.username, key_id,
+                 ",".join(sorted(changes)))
+        return JSONResponse({"ok": True, "record": _key_json(updated)})
 
     @router.delete("/ui/api/keys/{key_id}")
     async def api_keys_revoke(request: Request, key_id: str):
@@ -656,153 +781,186 @@ def build_web_router(state, *, throttle: LoginThrottle | None = None) -> APIRout
         return JSONResponse({"ok": True, "id": key_id})
 
     # ------------------------------------------------------------------ models / playground
-    @router.get("/ui/api/models")
-    async def api_models(request: Request):
-        user = require_user(request)
-        acc = user.account
-        # Same list as GET /v1/models (dedup, aliases, backend/model permissions).
-        from llmop.api import visible_models
+    if mode == "legacy":  # v0.1 only: one model, no playground in v0.2 (MERGE_PLAN 9.1)
+        @router.get("/ui/api/models")
+        async def api_models(request: Request):
+            user = require_user(request)
+            acc = user.account
+            # Same list as GET /v1/models (dedup, aliases, backend/model permissions).
+            from llmop.api import visible_models
 
-        try:
-            objs = await visible_models(state, acc)
-        except Exception as exc:
-            log.warning("list_models failed: %s", exc)
-            return JSONResponse({"data": [], "error": f"無法取得模型列表 (model list failed): {exc}"})
-        data = [
-            {
-                "id": o["id"],
-                "owned_by": o.get("owned_by", ""),
-                "context_length": o.get("context_length"),
-            }
-            for o in objs
-        ]
-        return JSONResponse({"data": data, "error": None})
+            try:
+                objs = await visible_models(state, acc)
+            except Exception as exc:
+                log.warning("list_models failed: %s", exc)
+                return JSONResponse({"data": [],
+                                     "error": f"無法取得模型列表 (model list failed): {exc}"})
+            data = [
+                {
+                    "id": o["id"],
+                    "owned_by": o.get("owned_by", ""),
+                    "context_length": o.get("context_length"),
+                }
+                for o in objs
+            ]
+            return JSONResponse({"data": data, "error": None})
 
-    @router.post("/ui/api/playground/chat")
-    async def api_playground_chat(request: Request):
-        user = mutating_user(request)
-        cfg = state.config
-        data = await _read_json(request)
+        @router.post("/ui/api/playground/chat")
+        async def api_playground_chat(request: Request):
+            user = mutating_user(request)
+            cfg = state.config
+            data = await _read_json(request)
 
-        model = data.get("model")
-        if not isinstance(model, str) or not model.strip() or len(model) > 200:
-            raise WebError(400, "請選擇模型 (model required).", "invalid_value")
-        messages = data.get("messages")
-        if messages is None:
-            prompt = data.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise WebError(400, "請輸入訊息 (prompt or messages required).", "invalid_value")
-            messages = [{"role": "user", "content": prompt}]
-        if not isinstance(messages, list) or not messages \
-                or len(messages) > PLAYGROUND_MAX_MESSAGES:
-            raise WebError(400, f"messages 必須是 1–{PLAYGROUND_MAX_MESSAGES} 則訊息的陣列.",
-                           "invalid_value")
-        clean, chars = [], 0
-        for m in messages:
-            if not isinstance(m, dict) or m.get("role") not in PLAYGROUND_ROLES \
-                    or not isinstance(m.get("content"), str):
-                raise WebError(400, "每則訊息需要 role (system/user/assistant) 與文字 content.",
+            model = data.get("model")
+            if not isinstance(model, str) or not model.strip() or len(model) > 200:
+                raise WebError(400, "請選擇模型 (model required).", "invalid_value")
+            messages = data.get("messages")
+            if messages is None:
+                prompt = data.get("prompt")
+                if not isinstance(prompt, str) or not prompt.strip():
+                    raise WebError(400, "請輸入訊息 (prompt or messages required).",
+                                   "invalid_value")
+                messages = [{"role": "user", "content": prompt}]
+            if not isinstance(messages, list) or not messages \
+                    or len(messages) > PLAYGROUND_MAX_MESSAGES:
+                raise WebError(400, f"messages 必須是 1–{PLAYGROUND_MAX_MESSAGES} 則訊息的陣列.",
                                "invalid_value")
-            chars += len(m["content"])
-            clean.append({"role": m["role"], "content": m["content"]})
-        if chars > PLAYGROUND_MAX_CHARS:
-            raise WebError(400, "訊息太長 (messages too long).", "invalid_value")
+            clean, chars = [], 0
+            for m in messages:
+                if not isinstance(m, dict) or m.get("role") not in PLAYGROUND_ROLES \
+                        or not isinstance(m.get("content"), str):
+                    raise WebError(400, "每則訊息需要 role (system/user/assistant) 與文字 content.",
+                                   "invalid_value")
+                chars += len(m["content"])
+                clean.append({"role": m["role"], "content": m["content"]})
+            if chars > PLAYGROUND_MAX_CHARS:
+                raise WebError(400, "訊息太長 (messages too long).", "invalid_value")
 
-        body: dict[str, Any] = {"model": model.strip(), "messages": clean, "stream": False}
-        max_tokens = _opt_int(data.get("max_tokens"), "max_tokens", 1, 10_000_000)
-        if max_tokens:
-            body["max_tokens"] = max_tokens
-        temperature = data.get("temperature")
-        if temperature is not None and temperature != "":
-            if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) \
-                    or not 0 <= temperature <= 2:
-                raise WebError(400, "temperature 必須介於 0 和 2 之間.", "invalid_value")
-            body["temperature"] = float(temperature)
+            body: dict[str, Any] = {"model": model.strip(), "messages": clean, "stream": False}
+            max_tokens = _opt_int(data.get("max_tokens"), "max_tokens", 1, 10_000_000)
+            if max_tokens:
+                body["max_tokens"] = max_tokens
+            temperature = data.get("temperature")
+            if temperature is not None and temperature != "":
+                if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) \
+                        or not 0 <= temperature <= 2:
+                    raise WebError(400, "temperature 必須介於 0 和 2 之間.", "invalid_value")
+                body["temperature"] = float(temperature)
 
-        try:
-            from ..api.proxy import forward
-        except ImportError as exc:  # pragma: no cover - API layer missing
-            raise WebError(503, f"試玩功能暫時無法使用 (playground unavailable): {exc}",
-                           "unavailable") from None
-        return await forward(state, "chat.completions", body, account=user.account,
-                             key_id=None, client_ip=auth.client_ip(request, cfg))
+            try:
+                from ..api.proxy import forward
+            except ImportError as exc:  # pragma: no cover - API layer missing
+                raise WebError(503, f"試玩功能暫時無法使用 (playground unavailable): {exc}",
+                               "unavailable") from None
+            return await forward(state, "chat.completions", body, account=user.account,
+                                 key_id=None, client_ip=auth.client_ip(request, cfg))
 
-    # ------------------------------------------------------------------ admin
+    # ------------------------------------------------------------------ admin (read)
     @router.get("/ui/api/admin/overview")
     async def api_admin_overview(request: Request):
-        require_admin(request)
+        user = require_admin(request)
         cfg = state.config
         store = state.store
         now = time.time()
+        masked = public
 
         all_keys = store.list_api_keys(None, include_revoked=True)
         labels = _key_labels(all_keys)
         active_by_user: dict[str, int] = {}
         for k in all_keys:
-            if k.active:
+            if k.active and k.username:
                 active_by_user[k.username] = active_by_user.get(k.username, 0) + 1
 
+        queue = wdata.queue_info(state, include_accounts=True)
         users = []
         for username, acc in cfg.accounts.items():
-            users.append({
+            item = {
                 "username": username,
                 "display_name": acc.display_name or username,
                 "role": acc.role,
+                "tier": getattr(acc, "tier", "normal"),
                 "disabled": acc.disabled,
                 "models": list(acc.models),
                 "max_api_keys": acc.max_api_keys,
                 "active_keys": active_by_user.get(username, 0),
                 "usage": state.quota.usage(acc),
-            })
+                "status": wdata.usage_status(state, acc),
+                "queue": (queue.get("accounts") or {}).get(username),
+            }
+            users.append(item)
         # Usage recorded for usernames no longer in the config (removed accounts).
         known = set(cfg.accounts)
-        orphans = [r for r in store.usage_by_user(month_start(now)) if r["username"] not in known]
+        orphans = [r for r in store.usage_by_user(month_start(now))
+                   if r["username"] not in known and not str(r["username"]).startswith("guest:")]
 
         try:
             backends = await state.router.health()
         except Exception as exc:
-            log.warning("backend health failed: %s", exc)
+            log.warning("backend health failed: %s", type(exc).__name__)
             backends = [{"name": "?", "type": "", "base_url": "", "reachable": False,
                          "model_count": 0, "error": str(exc)}]
+        backend_rows = [_health_row(b) for b in backends]
+        guest_keys = [wdata.guest_key_json(state, k, now, masked=masked)
+                      for k in store.list_guest_keys(include_revoked=True)
+                      if k.username is None]
+        try:
+            workers = [wdata.worker_json(state, w, masked=masked) for w in store.list_workers()]
+        except Exception:
+            workers = []
+        tunnels = wdata.tunnels_info(state, cfg)
 
-        return JSONResponse({
+        out: dict[str, Any] = {
             **_public_url_info(state, cfg),
+            "surface": mode,
+            "can_admin_write": can_admin_write(user),
             "tunnel": _tunnel_info(state, cfg),
+            "tunnels": tunnels,
+            "api_link": wdata.api_link_info(state),
             "config_error": state.holder.last_error,
             "config_path": str(cfg.path) if cfg.path else None,
+            "config_editable": bool(cfg.path) and admin_writes,
+            "model": getattr(cfg, "model", ""),
+            "local_account": getattr(cfg, "local_account", ""),
             "version": __version__,
             "started_at": getattr(state, "started_at", None),
             "server_time": now,
-            "backends": [_health_row(b) for b in backends],
+            "backends": backend_rows,
+            "slots": wdata.slots_info(cfg),
+            "queue": queue,
             "users": users,
             "orphan_usage_month": orphans,
             "keys": [dict(_key_json(k, now), username=k.username)
-                     for k in all_keys if k.revoked_at is None],
-            "recent": _usage_rows(store.recent_usage(None, 100), labels, with_user=True),
-        })
+                     for k in all_keys if k.revoked_at is None and k.username],
+            "guest_keys": guest_keys,
+            "workers": workers,
+            "recent": _usage_rows(store.recent_usage(None, 100), labels, with_user=True,
+                                  masked=masked),
+        }
+        if masked:
+            # MERGE_PLAN 2.7 rule 5: no secrets, internal URLs, config path, raw YAML,
+            # tunnel / API link details or client IPs on the public surface.
+            out["config_error"] = "設定檔重新載入失敗 (config reload error)" \
+                if state.holder.last_error else None
+            out["config_path"] = None
+            out["tunnel"] = {"running": out["tunnel"].get("running"),
+                             "status": out["tunnel"].get("status")}
+            out["tunnels"] = wdata.mask_tunnels(tunnels)
+            out["api_link"] = {"available": out["api_link"]["available"]}
+            out["backends"] = [{"name": b.get("name"), "type": b.get("type"),
+                                "reachable": b.get("reachable"),
+                                "model_count": b.get("model_count")} for b in backend_rows]
+            for k in out["keys"]:
+                k.pop("sig_public_key", None)
+        return JSONResponse(out)
 
-    @router.post("/ui/api/admin/revoke-key")
-    async def api_admin_revoke_key(request: Request):
-        user = mutating_user(request, admin=True)
-        data = await _read_json(request)
-        key_id = data.get("id")
-        if not isinstance(key_id, str) or not key_id:
-            raise WebError(400, "缺少金鑰 id (id required).", "invalid_value")
-        if not state.store.revoke_api_key(key_id):
-            raise WebError(404, "找不到這把金鑰，或已經撤銷 (key not found).", "not_found")
-        log.info("api key revoked by admin=%s id=%s", user.account.username, key_id)
-        return JSONResponse({"ok": True, "id": key_id})
+    # ------------------------------------------------------------------ admin (write)
+    if admin_writes:
+        from .console import register_console_routes
 
-    @router.post("/ui/api/admin/logout-user")
-    async def api_admin_logout_user(request: Request):
-        user = mutating_user(request, admin=True)
-        data = await _read_json(request)
-        username = data.get("username")
-        if not isinstance(username, str) or not username:
-            raise WebError(400, "缺少帳號 (username required).", "invalid_value")
-        count = state.store.delete_user_sessions(username)
-        log.info("sessions of %s deleted by admin=%s (%d)", username, user.account.username, count)
-        return JSONResponse({"ok": True, "username": username, "sessions_deleted": count})
+        register_console_routes(router, state, mutating_admin=lambda r: mutating_user(r, admin=True),
+                                require_admin=require_admin, read_json=_read_json,
+                                opt_int=_opt_int, sig_value=_sig_value,
+                                encryption_value=_encryption_value)
 
     # ------------------------------------------------------------------ fallbacks
     @router.get("/ui/{rest:path}")

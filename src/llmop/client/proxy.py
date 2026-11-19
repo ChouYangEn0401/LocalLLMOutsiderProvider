@@ -1,7 +1,12 @@
 """本機 OpenAI 相容代理：讓一般的 OpenAI 相容程式不必改動就能透過閘道使用 worker。
 
-只綁 127.0.0.1（loopback），而且**沒有任何驗證**：這台機器上任何能連到 loopback 的程式，都能以設定檔裡的
+只綁 127.0.0.1（loopback），而且**沒有帳號驗證**：這台機器上任何能連到 loopback 的程式，都能以設定檔裡的
 API 金鑰與簽章金鑰送出請求。正因如此，它拒絕綁到 loopback 以外的位址。
+
+為了擋住瀏覽器裡的惡意網頁（跨站請求、DNS rebinding），每個請求都要通過：
+- Host 必須剛好一個，而且是 127.0.0.1、localhost 或 [::1] 加上代理實際監聽的 port，否則 403。
+- 帶 Origin 標頭，或 Sec-Fetch-Site 是 cross-site，一律 403（一般的 OpenAI 相容程式不會送這些）。
+- 有本文的請求（POST）Content-Type 必須是 application/json，否則 415。
 
 - GET  /v1/models：已釘選 worker 提供的模型，OpenAI 清單格式。
 - POST /v1/chat/completions：一般的 OpenAI 請求。model 取自本文；max_tokens 取自 max_tokens 或
@@ -9,7 +14,7 @@ API 金鑰與簽章金鑰送出請求。正因如此，它拒絕綁到 loopback 
   max_tokens、max_completion_tokens 從本文移除。
 
 stream 為 true 時，閘道不做串流：代理先回 text/event-stream 標頭，等待期間每 15 秒寫一行註解
-": waiting"，完成後把整則訊息放在一個 chat.completion.chunk 裡送出，再送一個帶 finish_reason 與 usage
+": waiting"（閘道回報排隊資訊時改寫 ": queue position=3 eta=40"），完成後把整則訊息放在一個 chat.completion.chunk 裡送出，再送一個帶 finish_reason 與 usage
 的結尾 chunk，最後是 "data: [DONE]"。
 """
 
@@ -36,6 +41,8 @@ from llmop.protocol import MAX_BODY_BYTES
 log = logging.getLogger("llmop.client.proxy")
 
 LOOPBACK_HOST = "127.0.0.1"
+# Host 標頭允許的主機名稱（再加上代理實際監聽的 port）。
+ALLOWED_HOSTNAMES = ("127.0.0.1", "localhost", "[::1]")
 KEEPALIVE_SECONDS = 15.0
 # 封裝前要從本文移除的欄位：這些由代理決定，放進標頭或根本不送。
 STRIPPED_FIELDS = ("model", "stream", "stream_options", "max_tokens", "max_completion_tokens")
@@ -70,6 +77,51 @@ def _error_response(exc: ClientError) -> web.Response:
 
 def _internal_error() -> ClientError:
     return ClientError("internal_error", "代理發生內部錯誤", status=500)
+
+
+# ---------------------------------------------------------------------------
+# 本機防護（Host、Origin、Sec-Fetch-Site、Content-Type）
+# ---------------------------------------------------------------------------
+
+
+def _local_port(request: web.Request) -> int | None:
+    sockname = request.transport.get_extra_info("sockname") if request.transport is not None else None
+    if isinstance(sockname, tuple) and len(sockname) >= 2 and isinstance(sockname[1], int):
+        return sockname[1]
+    return None
+
+
+def host_allowed(host: str, port: int | None) -> bool:
+    """Host 標頭是否為 loopback 名稱加上代理的 port。port 是 80 時也接受省略 port 的寫法。"""
+    if port is None:
+        return False
+    host = host.lower()
+    for name in ALLOWED_HOSTNAMES:
+        if host == f"{name}:{port}" or (port == 80 and host == name):
+            return True
+    return False
+
+
+def _guard_error(request: web.Request) -> ClientError | None:
+    hosts = request.headers.getall("Host", [])
+    if len(hosts) != 1 or not host_allowed(hosts[0], _local_port(request)):
+        return ClientError("forbidden_host", "Host 標頭必須是本機代理的位址", status=403)
+    if "Origin" in request.headers:
+        return ClientError("forbidden_origin", "代理不接受瀏覽器的跨來源請求（帶有 Origin）", status=403)
+    if any(v.strip().lower() == "cross-site" for v in request.headers.getall("Sec-Fetch-Site", [])):
+        return ClientError("forbidden_origin", "代理不接受跨站請求", status=403)
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.content_type != "application/json":
+        return ClientError("unsupported_media_type", "Content-Type 必須是 application/json", status=415)
+    return None
+
+
+@web.middleware
+async def local_guard(request: web.Request, handler):
+    error = _guard_error(request)
+    if error is not None:
+        log.warning("拒絕請求 method=%s code=%s", request.method, error.code)
+        return _error_response(error)
+    return await handler(request)
 
 
 # ---------------------------------------------------------------------------
@@ -161,13 +213,23 @@ async def _write_event(resp: web.StreamResponse, data: dict | str) -> None:
     await resp.write(f"data: {text}\n\n".encode())
 
 
-async def _stream(request: web.Request, state: _State, call: Awaitable[dict], model: str) -> web.StreamResponse:
+def keepalive_comment(queue: dict[str, int] | None) -> bytes:
+    """保活註解：沒有排隊資訊就是 ": waiting"，有就是 ": queue position=3 eta=40"。值只會是整數。"""
+    if not queue:
+        return b": waiting\n\n"
+    fields = " ".join(f"{name}={int(queue[name])}" for name in sdk.QUEUE_FIELDS if name in queue)
+    return f": queue {fields}\n\n".encode()
+
+
+async def _stream(
+    request: web.Request, state: _State, call: Awaitable[dict], model: str, queue: dict
+) -> web.StreamResponse:
     resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
     await resp.prepare(request)
     task = asyncio.ensure_future(call)
     try:
         while not (await asyncio.wait({task}, timeout=state.keepalive))[0]:
-            await resp.write(b": waiting\n\n")
+            await resp.write(keepalive_comment(queue))
         try:
             completion = task.result()
         except ClientError as exc:
@@ -216,11 +278,25 @@ async def handle_chat(request: web.Request) -> web.StreamResponse:
         body, model, max_tokens, stream = split_request(await _read_json(request), state.config.default_max_tokens)
     except ClientError as exc:
         return _error_response(exc)
+    # 閘道最近一次回報的排隊資訊；只有串流模式能轉給應用程式（保活註解）。
+    queue: dict[str, int] = {}
+
+    def on_queue(info: dict[str, int]) -> None:
+        queue.clear()
+        queue.update(info)
+
     call = sdk.chat(
-        state.session, state.config, state.signing_key, body, model=model, max_tokens=max_tokens, deadline=state.deadline
+        state.session,
+        state.config,
+        state.signing_key,
+        body,
+        model=model,
+        max_tokens=max_tokens,
+        deadline=state.deadline,
+        on_queue=on_queue if stream else None,
     )
     if stream:
-        return await _stream(request, state, call, model)
+        return await _stream(request, state, call, model, queue)
     try:
         return web.json_response(await call)
     except ClientError as exc:
@@ -243,7 +319,7 @@ def make_app(
     keepalive: float = KEEPALIVE_SECONDS,
     deadline: float = sdk.DEADLINE_SECONDS,
 ) -> web.Application:
-    app = web.Application(client_max_size=MAX_BODY_BYTES)
+    app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[local_guard])
     app[STATE] = _State(config=config, signing_key=signing_key, keepalive=keepalive, deadline=deadline)
     app.cleanup_ctx.append(_client_session)
     app.router.add_get("/v1/models", handle_models)
@@ -257,7 +333,7 @@ def make_app(
 
 
 def check_bind_host(host: str) -> None:
-    """代理沒有驗證，只能綁 loopback 位址；其他位址一律拒絕。"""
+    """代理沒有帳號驗證，只能綁 loopback 位址；其他位址一律拒絕。"""
     try:
         ok = ipaddress.ip_address(host).is_loopback
     except ValueError:

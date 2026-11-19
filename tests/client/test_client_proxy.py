@@ -244,3 +244,139 @@ async def test_logs_never_contain_prompt_reply_or_secrets(client, fake, signing_
     assert fake.key_id in text
     for secret in (PROMPT, REPLY_TEXT, API_KEY, b64u_encode(crypto.private_raw(signing_key))):
         assert secret not in text
+
+
+# ---------------------------------------------------------------------------
+# 本機防護：Host、Origin、Sec-Fetch-Site、Content-Type
+# ---------------------------------------------------------------------------
+
+
+def chat_request() -> dict:
+    return {"model": MODEL, "messages": MESSAGES}
+
+
+@pytest.mark.parametrize("name", ["127.0.0.1", "localhost", "LocalHost", "[::1]"])
+async def test_loopback_host_with_port_allowed(client, fake, name):
+    port = client.server.port
+    resp = await client.post("/v1/chat/completions", json=chat_request(), headers={"Host": f"{name}:{port}"})
+    assert resp.status == 200
+    assert fake.posts == 1
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example.com",
+        "evil.example.com:{port}",
+        "127.0.0.1",
+        "localhost",
+        "127.0.0.1:{other}",
+        "localhost.:{port}",
+        "127.0.0.2:{port}",
+        "[::1]",
+        "::1:{port}",
+        "0.0.0.0:{port}",
+        "127.0.0.1:{port}.evil.com",
+        "",
+    ],
+)
+async def test_wrong_host_is_403(client, fake, host):
+    port = client.server.port
+    host = host.format(port=port, other=port + 1 if port < 65535 else port - 1)
+    for method, path, kwargs in (("POST", "/v1/chat/completions", {"json": chat_request()}), ("GET", "/v1/models", {})):
+        resp = await client.request(method, path, headers={"Host": host}, **kwargs)
+        assert resp.status == 403
+        assert_openai_error(await resp.json(), "forbidden_host")
+    assert fake.posts == 0
+
+
+@pytest.mark.parametrize(
+    "content_type", ["text/plain", "text/plain;charset=UTF-8", "application/x-www-form-urlencoded", "multipart/form-data", None]
+)
+async def test_non_json_content_type_is_415(client, fake, content_type):
+    headers = {"Content-Type": content_type} if content_type else {}
+    resp = await client.post("/v1/chat/completions", data=json.dumps(chat_request()).encode(), headers=headers)
+    assert resp.status == 415
+    assert_openai_error(await resp.json(), "unsupported_media_type")
+    assert fake.posts == 0
+
+
+async def test_json_content_type_with_charset_allowed(client, fake):
+    resp = await client.post(
+        "/v1/chat/completions",
+        data=json.dumps(chat_request()).encode(),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example.com", "null", "http://127.0.0.1:{port}", ""])
+async def test_origin_present_is_403(client, fake, origin):
+    origin = origin.format(port=client.server.port)
+    for method, path, kwargs in (("POST", "/v1/chat/completions", {"json": chat_request()}), ("GET", "/v1/models", {})):
+        resp = await client.request(method, path, headers={"Origin": origin}, **kwargs)
+        assert resp.status == 403
+        assert_openai_error(await resp.json(), "forbidden_origin")
+    assert fake.posts == 0
+
+
+async def test_sec_fetch_site_cross_site_is_403(client, fake):
+    for method, path, kwargs in (("POST", "/v1/chat/completions", {"json": chat_request()}), ("GET", "/v1/models", {})):
+        resp = await client.request(method, path, headers={"Sec-Fetch-Site": "cross-site"}, **kwargs)
+        assert resp.status == 403
+        assert_openai_error(await resp.json(), "forbidden_origin")
+    assert fake.posts == 0
+
+
+async def test_sec_fetch_site_none_allowed(client, fake):
+    resp = await client.post("/v1/chat/completions", json=chat_request(), headers={"Sec-Fetch-Site": "none"})
+    assert resp.status == 200
+
+
+async def test_guard_checks_host_before_content_type(client, fake):
+    resp = await client.post(
+        "/v1/chat/completions", data=b"x", headers={"Host": "evil.example.com", "Content-Type": "text/plain"}
+    )
+    assert resp.status == 403
+
+
+async def test_real_proxy_rejects_rebinding_host(config, signing_key, session):
+    runner = await proxy.start_proxy(config, signing_key, port=0)
+    try:
+        (address,) = runner.addresses
+        port = address[1]
+        async with session.get(f"http://127.0.0.1:{port}/v1/models", headers={"Host": f"rebind.evil.com:{port}"}) as resp:
+            assert resp.status == 403
+        async with session.get(f"http://127.0.0.1:{port}/v1/models", headers={"Host": f"localhost:{port}"}) as resp:
+            assert resp.status == 200
+    finally:
+        await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# 排隊資訊轉成保活註解
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_queue_info_becomes_keepalive_comment(config, signing_key, aiohttp_client, fake):
+    fake.pending_polls = 2
+    fake.poll_delay = 0.15
+    fake.queue = {"position": 3, "eta": 40}
+    client = await aiohttp_client(proxy.make_app(config, signing_key, keepalive=0.03))
+    resp = await client.post("/v1/chat/completions", json={"model": MODEL, "messages": MESSAGES, "stream": True})
+    events = parse_sse(await resp.text())
+    assert ": queue position=3 eta=40" in events
+    assert data_events(events)[-1] == "[DONE]"
+
+
+@pytest.mark.parametrize(
+    ("queue", "expected"),
+    [
+        (None, b": waiting\n\n"),
+        ({}, b": waiting\n\n"),
+        ({"position": 3, "eta": 40}, b": queue position=3 eta=40\n\n"),
+        ({"position": 0}, b": queue position=0\n\n"),
+    ],
+)
+def test_keepalive_comment(queue, expected):
+    assert proxy.keepalive_comment(queue) == expected

@@ -1,6 +1,8 @@
 """用戶端 SDK：封裝一筆請求、送到閘道、必要時輪詢，最後解開回覆。
 
-信任規則：只會加密給設定檔 pinned_workers 裡的 worker 公鑰。閘道在 /v1/models 給的公鑰只拿來比對，
+路徑：<gateway_url>/e2e/v1/models、/e2e/v1/chat/completions、/e2e/v1/requests/{id}；gateway_url 可含 gate 路徑。
+
+信任規則：只會加密給設定檔 pinned_workers 裡的 worker 公鑰。閘道在 /e2e/v1/models 給的公鑰只拿來比對，
 從不直接採用；沒有任何已釘選的 worker 提供該模型時，直接報錯，不會改用未釘選的金鑰。
 
 重試規則：
@@ -8,6 +10,9 @@
 - 輪詢時的網路失敗會以短暫退避重試，因為輪詢是冪等的。
 - 送出請求時的網路失敗，接著用同一個 request_id 輪詢一次；閘道說不認得這筆請求就報錯。
 - 整體期限（預設 1800 秒）一到就停止輪詢。
+
+排隊：閘道的 pending 回應可帶 "queue": {"position": 3, "eta": 40}；chat() 的 on_queue 會收到整理過的版本
+（只留非負整數），代理用它產生給應用程式的保活註解。
 
 紀錄只寫 request_id、模型、key_id、狀態與耗時；絕不寫提示、回覆、API 金鑰或簽章金鑰。
 """
@@ -17,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
+from collections.abc import Callable
 from typing import NamedTuple
 
 import aiohttp
@@ -44,6 +51,10 @@ HTTP_TIMEOUT_SECONDS = SYNC_WAIT_SECONDS + 30
 POLL_BACKOFF = (0.5, 1.0, 2.0, 4.0, 5.0)
 # 閘道應該長輪詢；如果它太快回 pending，至少隔這麼久再問，避免狂打閘道。
 POLL_MIN_INTERVAL = 0.5
+# 加密面的 API 路徑前綴（接在 gateway_url 之後；gateway_url 可含 gate 路徑）。
+API_PREFIX = "/e2e/v1"
+# pending 回應的 queue 裡會轉交給呼叫端的欄位。
+QUEUE_FIELDS = ("position", "eta")
 
 
 class ClientError(Exception):
@@ -91,7 +102,8 @@ class _Transient(Exception):
 
 
 def _url(config: ClientConfig, path: str) -> str:
-    return config.base_url + path
+    """把 API 路徑（例如 /models）接到 <gateway_url>/e2e/v1 後面。"""
+    return config.base_url + API_PREFIX + path
 
 
 async def _call(
@@ -154,9 +166,9 @@ def _parse_model_entry(entry: object) -> WorkerModel | None:
 
 
 async def list_models(session: aiohttp.ClientSession, config: ClientConfig) -> list[WorkerModel]:
-    """GET /v1/models，只留下公鑰已釘選、且 key_id 由公鑰重新計算後相符的項目。"""
+    """GET /e2e/v1/models，只留下公鑰已釘選、且 key_id 由公鑰重新計算後相符的項目。"""
     try:
-        status, data = await _call(session, config, "GET", "/v1/models")
+        status, data = await _call(session, config, "GET", "/models")
     except _Transient as exc:
         raise ClientError("network_error", f"無法連到閘道（{exc}）") from exc
     if status != 200:
@@ -205,6 +217,21 @@ def _check_params(body: object, model: object, max_tokens: object) -> None:
         raise ClientError("bad_request", f"max_tokens 必須是 {low} 到 {high} 的整數", status=400)
 
 
+def queue_info(data: dict) -> dict[str, int] | None:
+    """從 pending 回應取出 queue 資訊，只留 QUEUE_FIELDS 裡的非負整數（不接受布林）。沒有就回 None。"""
+    queue = data.get("queue")
+    if not isinstance(queue, dict):
+        return None
+    info: dict[str, int] = {}
+    for name in QUEUE_FIELDS:
+        value = queue.get(name)
+        if isinstance(value, float) and math.isfinite(value) and 0 <= value < 1e9:
+            value = round(value)
+        if type(value) is int and 0 <= value < 10**9:
+            info[name] = value
+    return info or None
+
+
 def _interpret(status: int, data: dict, request_id: str) -> str | None:
     """解讀閘道對 POST 或輪詢的回應：完成回傳 sealed，還在跑回傳 None，失敗丟 ClientError。"""
     if data.get("request_id", request_id) != request_id:
@@ -222,7 +249,7 @@ async def _poll(session: aiohttp.ClientSession, config: ClientConfig, request_id
     attempt = 0
     while True:
         try:
-            status, data = await _call(session, config, "GET", f"/v1/requests/{request_id}")
+            status, data = await _call(session, config, "GET", f"/requests/{request_id}")
         except _Transient as exc:
             delay = POLL_BACKOFF[min(attempt, len(POLL_BACKOFF) - 1)]
             attempt += 1
@@ -240,6 +267,7 @@ async def _send(
     body: dict,
     model: str,
     max_tokens: int,
+    on_queue: Callable[[dict[str, int]], None] | None = None,
 ) -> dict:
     worker = await _pick_worker(session, config, model)
     try:
@@ -257,7 +285,7 @@ async def _send(
     sent = time.monotonic()
     try:
         try:
-            status, data = await _call(session, config, "POST", "/v1/chat/completions", envelope.to_json())
+            status, data = await _call(session, config, "POST", "/chat/completions", envelope.to_json())
         except _Transient as exc:
             log.warning("送出請求時網路失敗（%s），以輪詢確認閘道是否收到 request_id=%s", exc, request_id)
             status, data = await _poll(session, config, request_id)
@@ -268,6 +296,8 @@ async def _send(
                 ) from exc
         log.debug("閘道回應 request_id=%s http_status=%s", request_id, status)
         while (sealed := _interpret(status, data, request_id)) is None:
+            if on_queue is not None and (queue := queue_info(data)) is not None:
+                on_queue(queue)
             asked = time.monotonic()
             status, data = await _poll(session, config, request_id)
             if status == 202:
@@ -301,16 +331,18 @@ async def chat(
     model: str,
     max_tokens: int,
     deadline: float = DEADLINE_SECONDS,
+    on_queue: Callable[[dict[str, int]], None] | None = None,
 ) -> dict:
     """送出一筆 chat-completions 請求並回傳 chat.completion 本文。失敗丟 ClientError。
 
     body 是 OpenAI 的請求本文，不含 model、max_tokens 與 stream（這些由參數決定，worker 會忽略本文裡的值）。
+    on_queue：閘道回 pending 且帶 queue 資訊時呼叫，參數見 queue_info()。
     """
     _check_params(body, model, max_tokens)
     started = time.monotonic()
     try:
         async with asyncio.timeout(deadline):
-            result = await _send(session, config, signing_key, body, model, max_tokens)
+            result = await _send(session, config, signing_key, body, model, max_tokens, on_queue)
     except TimeoutError:
         log.warning("請求逾時 model=%s duration=%.2fs", model, time.monotonic() - started)
         raise ClientError("timeout", f"超過 {deadline:g} 秒仍未完成") from None
