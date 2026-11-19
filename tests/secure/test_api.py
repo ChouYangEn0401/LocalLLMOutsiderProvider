@@ -145,7 +145,7 @@ async def test_guest_key_without_account(gateway):
     status, data = await gateway.post(guest, envelope)
     assert status == 200 and opener.open(data["sealed"])["ok"] is True
     [event] = gateway.usage_events(guest.key_id)
-    assert (event["username"], event["usage_source"], event["total_tokens"]) == ("", "worker", 18)
+    assert (event["username"], event["usage_source"], event["total_tokens"]) == (f"guest:{guest.key_id}", "worker", 18)
     assert gateway.state.usage.status(None, gateway.store.get_api_key(guest.key_id))  # 查得到
 
 

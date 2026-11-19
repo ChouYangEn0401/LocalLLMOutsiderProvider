@@ -20,6 +20,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from llmop.auth import usage_username
 from llmop.crypto import verify_request
 from llmop.protocol import (
     HTTP_STATUS,
@@ -218,7 +219,7 @@ def _settle(ctx: SecureContext, key: Any, account: Any, lease: Any):
         if job.code is None:
             ctx.quota.settle(prompt + completion, account, key)
         ctx.store.record_usage(UsageEvent(
-            username=account.username if account is not None else "",
+            username=usage_username(account, key),  # GUEST: "guest:<key id>", as on /v1
             endpoint=ENDPOINT,
             model=job.model,
             backend=job.worker_name or job.worker_id or "",
@@ -309,7 +310,7 @@ async def _chat(ctx: SecureContext, request: Request, trace: dict) -> JSONRespon
         conn = hub.route(header.key_id, header.model)
         scheduler = ctx.scheduler
         tier = _queue_tier(lease, key, account)
-        who = account.username if account is not None else (getattr(lease, "subject", None) or f"key:{key.id}")
+        who = usage_username(account, key)  # same queue identity as the direct /v1
         slot = scheduler.slot(who, tier, ZONE)
     except BaseException:
         lease.release()

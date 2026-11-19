@@ -52,6 +52,40 @@ WINGET_HINT = "winget install --id Cloudflare.cloudflared"
 STATUSES = ("off", "starting", "ready", "restarting", "error", "stopped")
 PUBLIC_URL_FILE = "public_url.txt"
 LOCK_FILE = "tunnel.lock"
+#: Tunnel names of the v0.2 node: "ui" (account website) keeps the v0.1 file names
+#: and store key; "api" (the API link) has its own, so the two never collide.
+TUNNEL_NAMES = ("ui", "api")
+
+
+def _names_for(name: str) -> tuple[str, str, str]:
+    """(store key, URL file, lock file) for a tunnel name ("" = the v0.1 tunnel)."""
+    if not name or name == "ui":
+        return "public_url", PUBLIC_URL_FILE, LOCK_FILE
+    return f"{name}_tunnel_url", f"{name}_tunnel_url.txt", f"tunnel-{name}.lock"
+
+
+def _url_port(url: str) -> int | None:
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        return parts.port or {"http": 80, "https": 443}.get(parts.scheme.lower())
+    except ValueError:
+        return None
+
+
+def forbidden_tunnel_ports(cfg) -> set[int]:
+    """Ports a tunnel must never point at (MERGE_PLAN 2.7 rule 6): the local console
+    (``listeners.local``) and every LLM backend on this machine."""
+    ports: set[int] = set()
+    listeners = getattr(cfg, "listeners", None)
+    if listeners is not None:
+        ports.add(int(listeners.local))
+    for backend in getattr(cfg, "backends", None) or ():
+        port = _url_port(getattr(backend, "base_url", "") or "")
+        if port:
+            ports.add(port)
+    return ports
 
 
 # ---------------------------------------------------------------- locating cloudflared
@@ -161,6 +195,9 @@ class TunnelManager:
         backoff: tuple[float, float] = (5.0, 60.0),
         kill_timeout: float = 5.0,
         home: Path | None = None,
+        name: str = "",
+        forbidden_ports: "set[int] | frozenset[int] | tuple[int, ...]" = (),
+        single_instance: bool = True,
     ):
         self.settings = settings
         self.local_url = local_url.rstrip("/")
@@ -173,6 +210,11 @@ class TunnelManager:
         self.backoff_start, self.backoff_max = backoff
         self.kill_timeout = kill_timeout
         self._home = home
+        # v0.2: "ui" / "api" (two independent tunnels); "" = the v0.1 single tunnel.
+        self.name = name
+        self.forbidden_ports = frozenset(int(p) for p in forbidden_ports)
+        self.single_instance = single_instance
+        self._kv_key, self._url_file, self._lock_name = _names_for(name)
 
         self.url: str | None = None
         self.status: str = "off"
@@ -209,6 +251,12 @@ class TunnelManager:
         with a readable ``last_error``) when it cannot start at all."""
         if self.running:
             return True
+        port = _url_port(self.local_url)
+        if self.mode == "quick" and port in self.forbidden_ports:
+            return self._fail(
+                f"refusing to tunnel to {self.local_url}: that port is the local console or "
+                "an LLM backend, which must never be reachable from the internet."
+            )
         if self.mode == "named" and not self.settings.token:
             return self._fail(
                 "tunnel.mode is 'named' but tunnel.token is empty. Put the token from the "
@@ -239,7 +287,8 @@ class TunnelManager:
         self._stop.clear()
         self.status = "starting"
         self.last_error = None
-        self._thread = threading.Thread(target=self._run, name="llmop-tunnel", daemon=True)
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name=f"llmop-tunnel-{self.name}" if self.name else "llmop-tunnel")
         self._thread.start()
         return True
 
@@ -399,15 +448,15 @@ class TunnelManager:
         self.url = url
         if self.store is not None:
             try:
-                self.store.kv_set("public_url", url)
+                self.store.kv_set(self._kv_key, url)
             except Exception as exc:  # never let bookkeeping kill the tunnel
-                log.warning("could not store public_url: %s", exc)
+                log.warning("could not store %s: %s", self._kv_key, exc)
         if self.data_dir is not None:
             try:
                 self.data_dir.mkdir(parents=True, exist_ok=True)
-                (self.data_dir / PUBLIC_URL_FILE).write_text(url + "\n", encoding="utf-8")
+                (self.data_dir / self._url_file).write_text(url + "\n", encoding="utf-8")
             except OSError as exc:
-                log.warning("could not write %s: %s", PUBLIC_URL_FILE, exc)
+                log.warning("could not write %s: %s", self._url_file, exc)
         self._banner(url)
         if self.on_url is not None:
             try:
@@ -416,26 +465,39 @@ class TunnelManager:
                 log.exception("tunnel on_url callback failed")
 
     def _clear_url(self) -> None:
-        had = self.url is not None
-        self.url = None
-        if not had:
+        had, self.url = self.url, None
+        if had is None:
             return
+        # Only forget what this manager published: a replacement tunnel with the same
+        # name (API link host change) may already have written its own URL.
         if self.store is not None:
             try:
-                self.store.kv_set("public_url", "")
+                got = self.store.kv_get(self._kv_key)
+                if not got or got[0] in ("", had):
+                    self.store.kv_set(self._kv_key, "")
             except Exception:
                 pass
         if self.data_dir is not None:
             try:
-                (self.data_dir / PUBLIC_URL_FILE).unlink()
+                path = self.data_dir / self._url_file
+                if path.read_text(encoding="utf-8").strip() in ("", had):
+                    path.unlink()
             except OSError:
                 pass
 
     def _banner(self, url: str) -> None:
         line = "=" * 66
         where = (
-            str(self.data_dir / PUBLIC_URL_FILE) if self.data_dir is not None else PUBLIC_URL_FILE
+            str(self.data_dir / self._url_file) if self.data_dir is not None else self._url_file
         )
+        if self.name == "api":
+            line = "=" * 66
+            for r in ("", line, f"  API TUNNEL ({self.mode}): {url}",
+                      "  The API link is this host plus the secret path; it is shown on",
+                      "  the local console and by:  llmop tunnel show-api", line, ""):
+                self._out(r)
+            log.info("api tunnel URL: %s", url)
+            return
         rows = [
             "",
             line,
@@ -477,9 +539,9 @@ class TunnelManager:
 
     # ------------------------------------------------------------ single-instance lock
     def _acquire_lock(self) -> bool:
-        if self.data_dir is None:
+        if self.data_dir is None or not self.single_instance:
             return True
-        result = _try_lock(self.data_dir)
+        result = _try_lock(self.data_dir, self._lock_name)
         if result is False:
             return False
         self._lockfile = result
@@ -490,13 +552,13 @@ class TunnelManager:
         _unlock(fh)
 
 
-def _try_lock(data_dir: Path) -> "IO | None | bool":
+def _try_lock(data_dir: Path, lock_name: str = LOCK_FILE) -> "IO | None | bool":
     """Lock ``<data_dir>/tunnel.lock`` without waiting. Returns the open file (keep it
     to hold the lock), ``False`` if another process holds it, or ``None`` if locking
     is not possible here (then we carry on without a lock)."""
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
-        fh = open(data_dir / LOCK_FILE, "a+")
+        fh = open(data_dir / lock_name, "a+")
     except OSError:
         return None
     try:
@@ -534,25 +596,26 @@ def _unlock(fh: "IO | None") -> None:
         fh.close()
 
 
-def clear_stale_public_url(store, data_dir: Path | str | None) -> bool:
+def clear_stale_public_url(store, data_dir: Path | str | None, name: str = "") -> bool:
     """Forget a quick-tunnel URL left behind by a tunnel that was killed (window
     closed, crash). Only when no tunnel holds the lock for ``data_dir``: a separate
     ``llmop tunnel`` that is still running keeps its URL. Returns True if cleared."""
     if data_dir is None:
         return False
     data_dir = Path(data_dir)
-    fh = _try_lock(data_dir)
+    kv_key, url_file, lock_name = _names_for(name)
+    fh = _try_lock(data_dir, lock_name)
     if fh is False:
         return False  # a live tunnel owns the URL
     try:
         cleared = False
         if store is not None:
-            got = store.kv_get("public_url")
+            got = store.kv_get(kv_key)
             if got and got[0]:
-                store.kv_set("public_url", "")
+                store.kv_set(kv_key, "")
                 cleared = True
         try:
-            (data_dir / PUBLIC_URL_FILE).unlink()
+            (data_dir / url_file).unlink()
             cleared = True
         except OSError:
             pass

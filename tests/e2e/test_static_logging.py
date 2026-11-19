@@ -26,10 +26,8 @@ FORBIDDEN = re.compile(
 # 明確的例外，越短越好；每一項都要說明為什麼安全。鍵是 (相對於 src/llmop 的檔案, 名稱)。
 ALLOWED = {
     # API 金鑰的公開代號（k_ 加 12 個十六進位字元），docs/PROTOCOL.md 1.1 明定可以寫進紀錄。
-    ("gateway/api.py", "api_key_id"): "公開代號",
-    ("gateway/worker_ws.py", "api_key_id"): "公開代號",
-    # 密碼長度下限這個常數，不是密碼本身。
-    ("gateway/cli.py", "MIN_PASSWORD_LEN"): "常數",
+    ("secure/api.py", "api_key_id"): "公開代號",
+    ("secure/worker_ws.py", "api_key_id"): "公開代號",
     # `llmop client chat` 的用途就是把解開後的回答印給使用者本人看；這發生在用戶端本機，不經過閘道。
     ("client/cli.py", "content"): "用戶端顯示回答",
 }
@@ -109,7 +107,7 @@ def _exception_dumps(source: str, filename: str) -> list[str]:
 
 
 # 只掃加密相關（B）的模組；A 的直連模組本來就處理明文，不適用這條規則。
-SCANNED = ("gateway/", "worker/", "client/", "crypto.py", "protocol.py", "paths.py")
+SCANNED = ("secure/", "worker/", "client/", "crypto.py", "protocol.py", "paths.py")
 
 
 def _sources() -> dict[str, str]:
@@ -146,7 +144,7 @@ def test_allow_list_entries_are_still_needed():
 def test_gateway_and_worker_never_dump_exceptions():
     problems = []
     for filename, source in _sources().items():
-        if filename.startswith(("gateway/", "worker/")):
+        if filename.startswith(("secure/", "worker/")):
             problems += _exception_dumps(source, filename)
     assert not problems, "\n".join(problems)
 

@@ -4,6 +4,7 @@ check / usage / keys. ``serve`` is tested with mocks (no real uvicorn, no real t
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -584,3 +585,121 @@ def test_usage_keys_and_revoke(config_file, capsys):
     assert "revoked" in out
     code, _, err = run(capsys, "--config", config_file, "revoke-key", rec.id)
     assert code == 1 and "no active API key" in err
+
+
+# ------------------------------------------------------------------ v0.2 node (T-9)
+@pytest.fixture
+def node_run(monkeypatch):
+    rec: dict = {}
+
+    def run_node(cfg, **kw):
+        rec["cfg"], rec["kw"] = cfg, kw
+        return 0
+
+    monkeypatch.setattr(cli, "_run_node", run_node)
+    monkeypatch.setattr(cli, "_run_uvicorn", lambda app, **kw: rec.setdefault("uvicorn", kw))
+    return rec
+
+
+def test_serve_without_port_starts_the_node(config_file, capsys, node_run):
+    code, out, err = run(capsys, "--config", config_file, "serve")
+    assert code == 0, err
+    assert node_run["kw"] == {"tunnels": None, "worker": None, "log_level": "info"}
+    assert "uvicorn" not in node_run  # not the v0.1 single listener
+    assert run(capsys, "--config", config_file, "serve", "--no-tunnel", "--worker")[0] == 0
+    assert node_run["kw"]["tunnels"] is False and node_run["kw"]["worker"] is True
+
+
+def test_serve_node_still_refuses_the_placeholder_password(tmp_path, capsys, node_run):
+    path = tmp_path / "config.yaml"
+    path.write_text(cli._example_text(), encoding="utf-8")
+    code, _, err = run(capsys, "--config", path, "serve")
+    assert code == 2 and "placeholder" in err and "cfg" not in node_run
+
+
+def test_gateway_aliases(config_file, capsys, node_run, tmp_path, no_prompt):
+    from llmop.__main__ import main as llmop_main
+
+    assert llmop_main(["gateway", "run", "--config", str(config_file), "--no-tunnel"]) == 0
+    assert node_run["kw"]["tunnels"] is False
+    path = tmp_path / "g.yaml"
+    assert llmop_main(["gateway", "init", "--config", str(path), "--admin-password", ADMIN_PW]) == 0
+    assert verify_password(ADMIN_PW, load_config(path).accounts["admin"].password_hash)
+    assert llmop_main(["gateway"]) == 2
+    assert llmop_main(["gateway", "nope"]) == 2
+    assert "gateway {run,init}" in capsys.readouterr().err
+
+
+def test_role_cli_without_the_secure_extra_prints_a_hint(monkeypatch, capsys):
+    import importlib
+
+    from llmop import __main__ as entry
+
+    real = importlib.import_module
+
+    def fake_import(name, *a, **kw):
+        if name == "llmop.worker.cli":
+            raise ModuleNotFoundError("No module named 'cryptography'", name="cryptography")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(entry.importlib, "import_module", fake_import)
+    assert entry.main(["worker", "run"]) == 2
+    err = capsys.readouterr().err
+    assert 'pip install "localllm-outsider-provider[secure]"' in err
+    assert "Traceback" not in err
+
+
+def test_init_model_option(tmp_path, capsys, no_prompt):
+    path = tmp_path / "config.yaml"
+    code, _, err = run(capsys, "--config", path, "init", "--admin-password", ADMIN_PW,
+                       "--model", "qwen3.5:9b")
+    assert code == 0, err
+    cfg = load_config(path)
+    assert cfg.model == "qwen3.5:9b"
+    assert cfg.listeners.local == 8781 and cfg.tunnels.api.mode == "quick"
+    assert "# Ports of the three entry points" in path.read_text(encoding="utf-8")
+
+
+def test_tunnel_rotate_and_show_api(config_file, capsys):
+    data = config_file.parent / "data"
+    code, out, _ = run(capsys, "--config", config_file, "tunnel", "show-api")
+    assert code == 0
+    first = re.search(r"API link : (\S+)/v1", out).group(1)
+    assert first.startswith("http://127.0.0.1:8782/")
+    code, out, _ = run(capsys, "--config", config_file, "tunnel", "rotate-api", "--reason", "leak")
+    assert code == 0 and "old link stopped working" in out
+    second = re.search(r"(http://127\.0\.0\.1:8782/\S+)/v1", out).group(1)
+    assert second != first
+    code, out, _ = run(capsys, "--config", config_file, "tunnel", "show-api")
+    assert second in out
+    code, out, _ = run(capsys, "--config", config_file, "tunnel", "rotate-api", "--grace", "600")
+    assert code == 0 and "600 more seconds" in out
+    audit = (data / "api_link_audit.jsonl").read_text(encoding="utf-8")
+    assert '"reason": "leak"' in audit
+    assert first.rsplit("/", 1)[1] not in audit and second.rsplit("/", 1)[1] not in audit
+
+
+def test_tunnel_rotate_api_change_host_without_a_node(config_file, capsys):
+    code, out, err = run(capsys, "--config", config_file, "tunnel", "rotate-api", "--change-host",
+                         "--wait", "0.2")
+    assert code == 0
+    assert "no running node answered" in err and "[OK] new API link" in out
+    store = Store(config_file.parent / "data" / "llmop.sqlite3")
+    try:
+        assert store.kv_get("api_tunnel_restart")[0] == ""  # not left for a later start
+    finally:
+        store.close()
+
+
+def test_tunnel_command_refuses_the_local_console_port(config_file, capsys, monkeypatch):
+    seen = {}
+
+    class Refusing(FakeTunnel):
+        def start(self):
+            seen["forbidden"] = self.kw.get("forbidden_ports")
+            return False
+
+    monkeypatch.setattr(cli, "TunnelManager", Refusing)
+    code, _, _ = run(capsys, "--config", config_file, "tunnel", "--url", "http://127.0.0.1:8781")
+    assert code == 1
+    assert 8781 in seen["forbidden"] and 11434 in seen["forbidden"]

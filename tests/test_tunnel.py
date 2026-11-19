@@ -357,3 +357,82 @@ def test_no_console_window_flag_only_on_windows():
         assert _creationflags() == 0
     else:
         assert _creationflags() in (0, getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+
+
+# ------------------------------------------------------------------ v0.2: two named tunnels (T-9)
+def test_ui_and_api_tunnels_are_independent(fake, exe, tmp_path, store):
+    """"ui" keeps the v0.1 store key / file / lock; "api" has its own, so both run at
+    once and stopping one never touches the other's URL."""
+    ui = make(fake, exe, tmp_path, store, name="ui")
+    api = TunnelManager(TunnelSettings(enabled=True, cloudflared=exe), "http://127.0.0.1:8782",
+                        store, tmp_path / "data", popen=fake, out=lambda s: None,
+                        home=tmp_path / "home", name="api", single_instance=False)
+    try:
+        assert ui.start() and wait_for(lambda: ui.url)  # the fake numbers its URLs in order
+        assert api.start() and wait_for(lambda: api.url)
+        assert ui.url != api.url
+        assert store.kv_get("public_url")[0] == ui.url
+        assert store.kv_get("api_tunnel_url")[0] == api.url
+        assert (tmp_path / "data" / "api_tunnel_url.txt").read_text().strip() == api.url
+        assert fake.commands[-1][-1] == "http://127.0.0.1:8782"
+        api.stop()
+        assert store.kv_get("public_url")[0] == ui.url and ui.running
+        assert store.kv_get("api_tunnel_url")[0] == ""
+    finally:
+        ui.stop()
+        api.stop()
+
+
+def test_a_replaced_tunnel_does_not_erase_its_successors_url(fake, exe, tmp_path, store):
+    def api_tunnel():
+        return TunnelManager(TunnelSettings(enabled=True, cloudflared=exe), "http://127.0.0.1:8782",
+                             store, tmp_path / "data", popen=fake, out=lambda s: None,
+                             home=tmp_path / "home", name="api", single_instance=False)
+
+    old, new = api_tunnel(), api_tunnel()
+    try:
+        assert old.start() and wait_for(lambda: old.url)
+        assert new.start() and wait_for(lambda: new.url)
+        old.stop()  # new first, then the old one (API link host change)
+        assert store.kv_get("api_tunnel_url")[0] == new.url
+        assert (tmp_path / "data" / "api_tunnel_url.txt").read_text().strip() == new.url
+    finally:
+        old.stop()
+        new.stop()
+
+
+def test_refuses_to_tunnel_to_the_console_or_a_backend(fake, exe, tmp_path):
+    from llmop.config import parse_config
+    from llmop.tunnel import forbidden_tunnel_ports
+
+    cfg = parse_config({"backends": [{"type": "ollama"},
+                                     {"name": "v", "type": "vllm", "base_url": "http://127.0.0.1:8000/v1"}],
+                        "listeners": {"local": 9781}})
+    ports = forbidden_tunnel_ports(cfg)
+    assert ports == {9781, 11434, 8000}
+    for url in ("http://127.0.0.1:9781", "http://localhost:11434/", "http://127.0.0.1:8000"):
+        mgr = TunnelManager(TunnelSettings(enabled=True, cloudflared=exe), url, None,
+                            tmp_path / "data", popen=fake, out=lambda s: None,
+                            home=tmp_path / "home", forbidden_ports=ports)
+        assert mgr.start() is False
+        assert mgr.status == "error" and "refusing" in mgr.last_error
+    assert fake.commands == []  # cloudflared was never started
+    ok = TunnelManager(TunnelSettings(enabled=True, cloudflared=exe), "http://127.0.0.1:8782", None,
+                       tmp_path / "data", popen=fake, out=lambda s: None,
+                       home=tmp_path / "home", forbidden_ports=ports)
+    try:
+        assert ok.start()
+    finally:
+        ok.stop()
+
+
+def test_clear_stale_url_per_tunnel_name(tmp_path, store):
+    data = tmp_path / "data"
+    data.mkdir()
+    store.kv_set("public_url", "https://ui.trycloudflare.com")
+    store.kv_set("api_tunnel_url", "https://api.trycloudflare.com")
+    assert clear_stale_public_url(store, data, "api")
+    assert store.kv_get("api_tunnel_url")[0] == ""
+    assert store.kv_get("public_url")[0] == "https://ui.trycloudflare.com"
+    assert clear_stale_public_url(store, data, "ui")
+    assert store.kv_get("public_url")[0] == ""

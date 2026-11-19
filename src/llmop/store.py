@@ -554,6 +554,19 @@ class Store:
             (since_ts,),
         )]
 
+    def usage_by_key(self, key_ids: list[str], since_ts: float = 0.0) -> dict[str, dict]:
+        """``{key_id: {"requests", "total"}}`` since ``since_ts`` (0 = all time)."""
+        if not key_ids:
+            return {}
+        marks = ",".join("?" * len(key_ids))
+        rows = self._all(
+            "SELECT key_id, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS total"
+            f" FROM usage_events WHERE key_id IN ({marks}) AND ts >= ? GROUP BY key_id",
+            (*key_ids, float(since_ts)),
+        )
+        return {r["key_id"]: {"requests": int(r["requests"]), "total": int(r["total"])}
+                for r in rows}
+
     def recent_usage(self, username: str | None, limit: int = 50) -> list[dict]:
         sql = "SELECT * FROM usage_events"
         params: tuple = ()

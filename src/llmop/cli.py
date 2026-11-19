@@ -1,13 +1,18 @@
 """``llmop`` command line (also ``python -m llmop``).
 
     llmop init                     create config.yaml and set the admin password
-    llmop serve [--tunnel]         run the gateway (optionally with a public URL)
+    llmop serve [--no-tunnel]      run the whole node: local console, account website,
+                                   API link, tunnels, worker (per config.yaml)
+    llmop serve --port N           the v0.1 single-listener gateway (compatibility)
     llmop add-user NAME            add an account to config.yaml (comments are kept)
     llmop set-password NAME        change an account's password
     llmop hash-password            print a password hash for config.yaml
     llmop check                    validate config.yaml and test the LLM backends
     llmop usage / keys / revoke-key
     llmop tunnel                   only the tunnel, for a server that already runs
+    llmop tunnel rotate-api        new secret API link (--change-host: new host too)
+    llmop tunnel show-api          print the current API link
+    llmop gateway run | init       aliases of serve | init
 
 The global ``--config PATH`` (default: ``$LLMOP_CONFIG`` or ``config.yaml``) may be
 given before or after the command. ``$LLMOP_DATA_DIR`` overrides
@@ -51,6 +56,7 @@ from .tunnel import (
     clear_stale_public_url,
     conflicting_config_files,
     find_cloudflared,
+    forbidden_tunnel_ports,
 )
 
 ENV_CONFIG = "LLMOP_CONFIG"
@@ -560,6 +566,12 @@ def _run_uvicorn(app, **kwargs) -> None:
     uvicorn.run(app, **kwargs)
 
 
+def _run_node(cfg: Config, **kwargs) -> int:
+    from .node import run_node
+
+    return asyncio.run(run_node(cfg, **kwargs))
+
+
 def _backend_health(cfg: Config) -> list[dict]:
     """Same call as ``asyncio.run(state.router.health())`` without opening the database."""
     from .backends import BackendRouter
@@ -609,6 +621,8 @@ def cmd_init(args) -> int:
         entry = {"role": "admin", "password_hash": pw_hash}
         text, kept = edit_config_text(text, lambda t: _text_add_account(t, admin, entry),
                                       lambda r: _raw_add_account(r, admin, entry))
+    if getattr(args, "model", None):
+        text = _set_model_line(text, args.model)
     if args.backend_type or args.backend_url:
         btype = (args.backend_type or "ollama").lower()
         values = {"name": btype, "type": btype, "base_url": args.backend_url or DEFAULT_URLS[btype]}
@@ -630,10 +644,25 @@ def cmd_init(args) -> int:
     _out("")
     _out("Next steps:")
     _out("  1. Make sure your LLM server runs (Ollama: http://127.0.0.1:11434).  Test: llmop check")
-    _out("  2. Start locally:      llmop serve            (Windows: Start.bat)")
-    _out("     With a public URL:  llmop serve --tunnel   (Windows: Start-With-Tunnel.bat)")
+    _out("     Set the one model everybody uses:  model: <name>  in the config")
+    _out("  2. Start everything:   llmop serve            (Windows: Start.bat)")
+    _out("     Public URLs: set tunnels.ui / tunnels.api enabled: true, or llmop serve --tunnel")
     _out("  3. Add a friend:       llmop add-user NAME    (Windows: Add-User.bat)")
     return 0
+
+
+_MODEL_LINE = re.compile(r'^model:[^\n]*$', re.M)
+
+
+def _set_model_line(text: str, model: str) -> str:
+    """Set the top-level ``model:`` line (added at the end when missing)."""
+    model = model.strip()
+    if not model or any(c in model for c in "\r\n"):
+        raise CliError("--model must be a model name, e.g. qwen3.5:9b", 2)
+    line = f"model: {_yaml_scalar(model)}"
+    if _MODEL_LINE.search(text):
+        return _MODEL_LINE.sub(lambda m: line, text, count=1)
+    return text.rstrip("\n") + "\n" + line + "\n"
 
 
 def cmd_hash_password(args) -> int:
@@ -748,6 +777,39 @@ def _make_banner(cfg: Config, local: str, tunnel) -> list[str]:
 
 
 def cmd_serve(args) -> int:
+    if args.host is None and args.port is None:
+        return cmd_serve_node(args)
+    return cmd_serve_single(args)
+
+
+def cmd_serve_node(args) -> int:
+    """The v0.2 node: three listeners, two tunnels, the worker (see llmop.node)."""
+    cfg = _load(args)
+    errors, warnings = preflight(cfg)
+    for w in warnings:
+        _warn(w)
+    if errors:
+        for e in errors:
+            _err(e)
+        _err("not starting.")
+        return 2
+    level = args.log_level or "info"
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.DEBUG if level == "trace" else level.upper(),
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if args.open and "gateway" in cfg.roles:
+        timer = threading.Timer(2.0, webbrowser.open,
+                                args=(f"http://127.0.0.1:{cfg.listeners.local}/",))
+        timer.daemon = True
+        timer.start()
+    code = _run_node(cfg, tunnels=args.tunnel, worker=getattr(args, "worker", None),
+                     log_level=level)
+    _out("llmop stopped.")
+    return int(code or 0)
+
+
+def cmd_serve_single(args) -> int:
+    """v0.1: one listener (``--host`` / ``--port``) with the combined app."""
     cfg = _load(args)
     host = args.host or cfg.server.host
     port = int(args.port or cfg.server.port)
@@ -828,6 +890,11 @@ def cmd_serve(args) -> int:
 
 
 def cmd_tunnel(args) -> int:
+    action = getattr(args, "action", None)
+    if action == "rotate-api":
+        return cmd_rotate_api(args)
+    if action == "show-api":
+        return cmd_show_api(args)
     cfg = _load(args)
     local = (args.url or local_base_url(cfg.server.host, cfg.server.port)).rstrip("/")
     settings = cfg.tunnel if cfg.tunnel.mode != "off" else replace(cfg.tunnel, mode="quick")
@@ -839,7 +906,8 @@ def cmd_tunnel(args) -> int:
     _out("Only the tunnel runs in this window. If 'llmop serve --tunnel' already runs, close this:")
     _out("two tunnels for one server are pointless.")
     store = _open_store(cfg, create=True)
-    mgr = TunnelManager(settings, local, store, cfg.data_path, public_url=cfg.server.public_url)
+    mgr = TunnelManager(settings, local, store, cfg.data_path, public_url=cfg.server.public_url,
+                        forbidden_ports=forbidden_tunnel_ports(cfg))
     try:
         if not mgr.start():
             return 1
@@ -851,6 +919,63 @@ def cmd_tunnel(args) -> int:
         mgr.stop()
         if store is not None:
             store.close()
+    return 0
+
+
+def _api_link_for(cfg: Config):
+    from .apilink import ApiLink, api_base_url
+
+    store = _open_store(cfg, create=True)
+    if store is None:
+        raise CliError(f"cannot open the database in {cfg.data_path}", 2)
+    link = ApiLink(store, cfg.data_path, base_url=lambda: api_base_url(cfg, None, store))
+    return store, link
+
+
+def cmd_show_api(args) -> int:
+    cfg = _load(args)
+    store, link = _api_link_for(cfg)
+    try:
+        url = link.current_url()
+        _out(f"API link : {url}/v1")
+        _out(f"Encrypted: {url}/e2e/v1")
+        _out("Keep it private: anyone with the link can try API keys against it.")
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_rotate_api(args) -> int:
+    """New secret path now (works with or without a running node: the node picks the
+    change up within a second). ``--change-host`` also asks the running node to
+    replace its API tunnel (new host name); the account website is not touched."""
+    from .apilink import host_change_pending, request_host_change
+
+    cfg = _load(args)
+    store, link = _api_link_for(cfg)
+    try:
+        if args.change_host:
+            request_host_change(store)
+            _out("asking the running node for a new API tunnel ...")
+            deadline = time.monotonic() + args.wait
+            while host_change_pending(store) and time.monotonic() < deadline:
+                time.sleep(0.5)
+            if host_change_pending(store):
+                store.kv_set("api_tunnel_restart", "")
+                _warn("no running node answered (llmop serve); only the secret path changes now. "
+                      "A quick tunnel gets a new host name at the next start anyway.")
+        result = link.rotate_path(args.reason or "llmop tunnel rotate-api", args.grace,
+                                  change_host=bool(args.change_host))
+        url = link.current_url()
+        _out("[OK] new API link:")
+        _out(f"     {url}/v1        (plain)")
+        _out(f"     {url}/e2e/v1    (encrypted)")
+        if result.get("grace_until"):
+            _out(f"     the old link keeps working for {args.grace:g} more seconds")
+        else:
+            _out("     the old link stopped working. API keys are unchanged.")
+    finally:
+        store.close()
     return 0
 
 
@@ -1048,7 +1173,7 @@ EPILOG = """\
 first time:
   llmop init                     create config.yaml (asks for the admin password)
   llmop check                    is everything configured / is the LLM reachable?
-  llmop serve --tunnel --open    start with a public https://...trycloudflare.com URL
+  llmop serve --tunnel --open    start the node with public https://...trycloudflare.com URLs
 """
 
 
@@ -1081,6 +1206,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help=f"admin password (default: ${ENV_ADMIN_PASSWORD}, else ask)")
     sp.add_argument("--backend-type", choices=BACKEND_TYPES, help="type of your LLM server (default ollama)")
     sp.add_argument("--backend-url", metavar="URL", help="URL of your LLM server, e.g. http://127.0.0.1:11434")
+    sp.add_argument("--model", metavar="NAME", help="the one model every request uses, e.g. qwen3.5:9b")
 
     sp = add("hash-password", cmd_hash_password, "print a password hash to paste into config.yaml")
     sp.add_argument("--password", metavar="PW", help="the password (default: ask, hidden)")
@@ -1101,15 +1227,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--password", metavar="PW", help="the password (default: ask, hidden)")
     sp.add_argument("--generate", action="store_true", help="generate a random password and print it")
 
-    sp = add("serve", cmd_serve, "run the gateway (web UI + OpenAI-compatible API)")
-    sp.add_argument("--host", help="listen address (default: server.host, normally 127.0.0.1)")
-    sp.add_argument("--port", type=int, help="port (default: server.port, normally 8780)")
+    sp = add("serve", cmd_serve, "run the node: local console, account website, API link, "
+             "tunnels and worker (see listeners / tunnels / roles in config.yaml)")
+    sp.add_argument("--host", help="v0.1 single-listener mode: listen address")
+    sp.add_argument("--port", type=int, help="v0.1 single-listener mode: port (normally 8780)")
     sp.add_argument("--tunnel", action=argparse.BooleanOptionalAction, default=None,
-                    help="also start a Cloudflare tunnel (default: tunnel.enabled)")
+                    help="start (--tunnel) or skip (--no-tunnel) the tunnels "
+                         "(default: tunnels.*.enabled; with --port: tunnel.enabled)")
+    sp.add_argument("--worker", action=argparse.BooleanOptionalAction, default=None,
+                    help="run the worker in this process (default: roles has worker)")
     sp.add_argument("--open", action="store_true", help="open the web page in the browser")
     sp.add_argument("--log-level", choices=LOG_LEVELS, default="info")
 
-    sp = add("tunnel", cmd_tunnel, "run only the Cloudflare tunnel, for a server that already runs")
+    sp = add("tunnel", cmd_tunnel, "run only the Cloudflare tunnel, for a server that already runs; "
+             "rotate-api: new API link; show-api: print it")
+    sp.add_argument("action", nargs="?", choices=("rotate-api", "show-api"),
+                    help="rotate-api: new secret API link; show-api: print the current one")
+    sp.add_argument("--change-host", action="store_true",
+                    help="rotate-api: also restart the API tunnel for a new host name")
+    sp.add_argument("--grace", type=float, default=0.0, metavar="SECONDS",
+                    help="rotate-api: the old link keeps working this long (default 0)")
+    sp.add_argument("--reason", default="", metavar="TEXT", help="rotate-api: noted in the audit log")
+    sp.add_argument("--wait", type=float, default=90.0, metavar="SECONDS", help=argparse.SUPPRESS)
     sp.add_argument("--url", help="local server URL (default: from config, http://127.0.0.1:8780)")
     sp.add_argument("--cloudflared", metavar="PATH", help="path to cloudflared(.exe)")
 

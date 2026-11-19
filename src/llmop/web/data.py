@@ -89,17 +89,11 @@ def usage_by_key(store, key_ids: list[str], since: float = 0.0) -> dict[str, dic
     """``{key_id: {"requests", "total"}}`` since ``since`` (0 = all time)."""
     if not key_ids:
         return {}
-    marks = ",".join("?" * len(key_ids))
     try:
-        rows = store._all(
-            "SELECT key_id, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS total"
-            f" FROM usage_events WHERE key_id IN ({marks}) AND ts >= ? GROUP BY key_id",
-            (*key_ids, float(since)),
-        )
+        return store.usage_by_key(key_ids, since)
     except Exception as exc:  # pragma: no cover - store without the table
         log.warning("per-key usage failed: %s", type(exc).__name__)
         return {}
-    return {r["key_id"]: {"requests": int(r["requests"]), "total": int(r["total"])} for r in rows}
 
 
 def key_usage_map(state, keys: list[ApiKey]) -> dict[str, dict]:

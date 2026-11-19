@@ -158,6 +158,9 @@ class ServerSettings:
     sse_keepalive: float = 15.0
     # Log every request (without bodies) to the console.
     access_log: bool = True
+    # Let the public API link stream (``stream: true``). Off by default: quick
+    # tunnels do not support SSE well (D21); the local /v1 always streams.
+    public_stream: bool = False
 
 
 @dataclass
@@ -168,6 +171,9 @@ class TunnelSettings:
     # For mode=named: the tunnel token from the Cloudflare dashboard (env:NAME recommended)
     token: str = ""
     extra_args: list[str] = field(default_factory=list)
+    # mode=named in "tunnels.ui" / "tunnels.api": this tunnel's own https URL (its
+    # hostname is accepted by the Host check and shown as the link).
+    public_url: str = ""
 
 
 @dataclass
@@ -482,6 +488,7 @@ def parse_config(raw: dict | None, path: Path | None = None) -> Config:
         server.data_dir = os.environ["LLMOP_DATA_DIR"]
     if server.cookie_secure not in ("auto", "always", "never"):
         raise ConfigError("server.cookie_secure must be auto | always | never")
+    server.public_stream = _bool(server.public_stream, "server.public_stream")
 
     backends: list[Backend] = []
     for i, b in enumerate(_as_list(raw.get("backends"), "backends")):
