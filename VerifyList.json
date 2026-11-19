@@ -9,7 +9,7 @@
   {"id": "build-wheel", "what": "Wheel and sdist build", "run": ["python", "-m", "build"],
    "cwd": ".", "env": {}, "expect": "exit 0, dist/*.whl and *.tar.gz", "needs": ["network"], "since": "2026-11-19",
    "status": "pending", "last_run": null, "last_result": null},
-  {"id": "docker-compose-v02", "what": "Docker image builds for v0.2 (three listeners, llmop serve)", "run": ["docker", "compose", "-f", "docker/docker-compose.yml", "build"],
+  {"id": "docker-compose-v02", "what": "Docker image builds for v0.2 (three listeners, llmop serve)", "run": ["docker", "compose", "-f", "docker/compose.host-ollama.yml", "build"],
    "cwd": ".", "env": {}, "expect": "exit 0", "needs": ["network", "heavy", "linux"], "since": "2026-11-19",
    "status": "pending", "last_run": null, "last_result": null}
  ]}
