@@ -3,7 +3,7 @@
 * ``quick`` mode: ``cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8780``
   gives a random ``https://xxx.trycloudflare.com`` address (no account, no domain,
   no open port). The address changes every time cloudflared starts.
-* ``named`` mode: ``cloudflared tunnel --no-autoupdate run --token <TOKEN>`` runs a
+* ``named`` mode: ``cloudflared tunnel --no-autoupdate run`` with ``TUNNEL_TOKEN=<TOKEN>`` in its environment runs a
   tunnel created in the Cloudflare dashboard (your own, stable hostname). The
   public address then comes from ``server.public_url`` in config.yaml.
 
@@ -243,8 +243,18 @@ class TunnelManager:
     def command(self, exe: str) -> list[str]:
         extra = [str(a) for a in (self.settings.extra_args or [])]
         if self.mode == "named":
-            return [exe, "tunnel", "--no-autoupdate", *extra, "run", "--token", self.settings.token]
+            # R-20: the token goes in the TUNNEL_TOKEN environment variable (see
+            # :meth:`environment`), never on the command line, where every local user
+            # can read it in the process list.
+            return [exe, "tunnel", "--no-autoupdate", *extra, "run"]
         return [exe, "tunnel", "--no-autoupdate", *extra, "--url", self.local_url]
+
+    def environment(self) -> dict[str, str] | None:
+        """Environment for cloudflared: a named tunnel gets ``TUNNEL_TOKEN`` (cloudflared
+        reads ``tunnel run --token`` from it); None = inherit unchanged."""
+        if self.mode != "named" or not self.settings.token:
+            return None
+        return {**os.environ, "TUNNEL_TOKEN": self.settings.token}
 
     def start(self) -> bool:
         """Start the background thread. Returns False (and sets ``status="error"``
@@ -381,6 +391,9 @@ class TunnelManager:
         flags = _creationflags()
         if flags:
             kwargs["creationflags"] = flags
+        env = self.environment()
+        if env is not None:
+            kwargs["env"] = env
         try:
             proc = self._popen(cmd, **kwargs)
         except OSError as exc:

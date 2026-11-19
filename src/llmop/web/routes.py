@@ -363,7 +363,7 @@ def _message_page(status: int, title: str, message: str, link: str, link_label: 
         "<!doctype html>\n<html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         f"<title>{t}</title>"
-        f"<link rel=\"stylesheet\" href=\"/ui/static/app.css?v={__version__}\">"
+        f"<link rel=\"stylesheet\" href=\"/ui/static/app.css?v={ASSET_TAG}\">"
         "<link rel=\"icon\" href=\"/ui/static/favicon.svg\" type=\"image/svg+xml\">"
         "</head><body class=\"page-center\"><main class=\"card narrow message-card\">"
         f"<p class=\"status-code\">{status}</p><h1>{t}</h1><p class=\"muted\">{m}</p>"
@@ -395,6 +395,12 @@ def _read_static(name: str) -> tuple[bytes, str] | None:
 
 
 # --------------------------------------------------------------------------- router
+VIP_TIERS = frozenset({"vip1", "vip2", "vip3"})
+# Cache-busting tag of the static files: changes with every release but does not
+# tell the version to an anonymous visitor (R-17).
+ASSET_TAG = hashlib.sha256(f"llmop-assets-{__version__}".encode()).hexdigest()[:10]
+
+
 def build_web_router(state, surface: str | None = None, *,
                      throttle: LoginThrottle | None = None) -> APIRouter:
     """``state`` is a :class:`llmop.app.AppState`; ``surface`` is ``"local"``,
@@ -460,7 +466,7 @@ def build_web_router(state, surface: str | None = None, *,
         if got is None:  # pragma: no cover - packaging error
             return _message_page(500, "頁面遺失", f"{PAGES[name]} not found", "/", "首頁")
         text = got[0].decode("utf-8")
-        text = text.replace("{{v}}", __version__).replace(
+        text = text.replace("{{v}}", ASSET_TAG).replace(
             "{{title}}", html.escape(state.config.server.title))
         return HTMLResponse(text)
 
@@ -724,6 +730,12 @@ def build_web_router(state, surface: str | None = None, *,
                                 "(an encrypted key needs a signing public key).",
                            "sig_public_key_required")
 
+        if public and getattr(acc, "tier", "normal") in VIP_TIERS:
+            # R-10 (AI default): VIP keys have high or no usage limits, so a leaked
+            # VIP password must not be enough to mint one from the internet.
+            raise WebError(403, "VIP 帳號的 API 金鑰只能在本機控制台（這台電腦的 "
+                                "http://127.0.0.1 入口）建立 (VIP keys can only be created "
+                                "on the local console).", "local_only")
         limit = int(acc.max_api_keys or 0)
         if limit <= 0:
             raise WebError(403, "這個帳號不能建立 API 金鑰 (API keys disabled for this account).",

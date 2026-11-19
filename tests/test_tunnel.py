@@ -203,8 +203,11 @@ def test_named_tunnel_uses_token_and_configured_public_url(fake, exe, tmp_path, 
     try:
         mgr.start()
         assert mgr.wait_ready(15)
+        # R-20: the token is passed in TUNNEL_TOKEN, not on the command line
         assert fake.commands == [[exe, "tunnel", "--no-autoupdate", "--protocol", "http2",
-                                  "run", "--token", "tok-123"]]
+                                  "run"]]
+        assert fake.kwargs[0]["env"]["TUNNEL_TOKEN"] == "tok-123"
+        assert "tok-123" not in " ".join(fake.commands[0])
         assert mgr.url == "https://llm.example.com"
         assert urls == ["https://llm.example.com"]
         assert store.kv_get("public_url")[0] == "https://llm.example.com"

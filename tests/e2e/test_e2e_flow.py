@@ -39,7 +39,8 @@ def _completion_parts(data: object, stream: bool) -> tuple[dict, str, dict]:
 @pytest.mark.parametrize("stream", [False, True], ids=["非串流", "串流"])
 @pytest.mark.parametrize("kind", ["ollama", "openai"])
 async def test_full_path_through_each_backend(make_stack, kind, stream):
-    stack = await make_stack()
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(model="")
     status, data, ctype = await stack.chat(MODELS[kind], "請用一句話介紹台北", stream=stream, temperature=0.3)
 
     assert status == 200
@@ -78,7 +79,8 @@ async def test_full_path_through_each_backend(make_stack, kind, stream):
 
 
 async def test_proxy_lists_models_of_pinned_worker(make_stack):
-    stack = await make_stack()
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(model="")
     async with stack.http.get(stack.proxy_url + "/v1/models") as resp:
         assert resp.status == 200
         data = await resp.json()
@@ -87,7 +89,8 @@ async def test_proxy_lists_models_of_pinned_worker(make_stack):
 
 
 async def test_worker_registration_and_reconnect_after_restart(make_stack):
-    stack = await make_stack()
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(model="")
 
     # 註冊：worker 把閘道發的身分存進 state.json（0600），註冊碼已用掉。
     state = stack.worker.state
@@ -210,7 +213,8 @@ async def test_revoked_api_key_is_unauthorized(make_stack):
 
 @pytest.mark.parametrize("stream", [False, True], ids=["非串流", "串流"])
 async def test_slow_backend_completes_through_202_and_polling(make_stack, stream):
-    stack = await make_stack(sync_wait_seconds=0.2)
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(sync_wait_seconds=0.2, model="")
     stack.backends["openai"].delay = 1.0  # 比同步等待時間長得多
 
     status, data, _ = await stack.chat(MODELS["openai"], stream=stream)

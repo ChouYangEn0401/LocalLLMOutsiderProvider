@@ -26,6 +26,7 @@ import os
 import signal
 import socket
 import threading
+import time
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -180,6 +181,7 @@ class Node:
         self._stop = asyncio.Event()
         self._stopped = False
         self._tunnel_lock = asyncio.Lock()
+        self._gate_seen: str | None = None  # current gate hash (rotation reminder)
 
     # ------------------------------------------------------------ helpers
     @property
@@ -324,9 +326,41 @@ class Node:
             log.info("api tunnel replaced")
             return True
 
+    def check_api_link(self) -> None:
+        """R-08: after a rotation (here or by the CLI) remind the operator about remote
+        workers, and close worker WebSockets that came in through a gate that no
+        longer works (after the grace period). Also R-13: follow config reloads."""
+        state = self.state
+        link = getattr(state, "api_link", None)
+        gates = link.gate_state() if link is not None else None
+        if gates is not None and gates.current_hash:
+            if self._gate_seen is None:
+                self._gate_seen = gates.current_hash
+            elif gates.current_hash != self._gate_seen:
+                self._gate_seen = gates.current_hash
+                from .apilink import REMOTE_WORKER_REMINDER
+
+                # The new link itself is not printed here (this output often ends up in
+                # a log file); it is in the local console and `llmop tunnel show-api`.
+                self.out("API link changed. Remote workers need gateway_url = "
+                         "wss://<new API link>/worker/ws (see the local console or "
+                         "llmop tunnel show-api).")
+                self.out(f"REMINDER: {REMOTE_WORKER_REMINDER}")
+        hub = getattr(state, "hub", None)
+        if hub is not None and gates is not None:
+            now = time.time()
+            closed = hub.disconnect_stale_gates(lambda h: gates.allows_hash(h, now))
+            for conn in closed:
+                self.out(f"WARNING: worker '{conn.name}' was connected through the old API "
+                         "link and has been disconnected; update its gateway_url.")
+        if getattr(state, "scheduler", None) is not None:
+            from .app import sync_scheduler
+
+            sync_scheduler(state.scheduler, state.config)
+
     async def _watch(self) -> None:
-        """Every second: pick up a gate / host change made by ``llmop tunnel rotate-api``
-        and notice a listener that died."""
+        """Every second: pick up a gate / host change made by ``llmop tunnel rotate-api``,
+        close worker connections of an expired gate and notice a listener that died."""
         link = getattr(self.state, "api_link", None)
         while not self._stop.is_set():
             try:
@@ -334,6 +368,10 @@ class Node:
                     await link.poll_requests()
             except Exception as exc:
                 log.warning("api link request failed: %s", type(exc).__name__)
+            try:
+                self.check_api_link()
+            except Exception as exc:
+                log.warning("api link check failed: %s", type(exc).__name__)
             if any(s.task.done() for s in self.servers):
                 log.error("a listener stopped unexpectedly; shutting down")
                 self._stop.set()

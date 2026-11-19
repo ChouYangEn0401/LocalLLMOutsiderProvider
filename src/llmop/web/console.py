@@ -219,7 +219,10 @@ def register_console_routes(
                            "rotate_failed") from None
         log.info("api link rotated by admin=%s change_host=%s", user.account.username,
                  change_host)
-        return JSONResponse({"ok": True, "api_link": wdata.api_link_info(state)})
+        from llmop.apilink import REMOTE_WORKER_REMINDER
+
+        return JSONResponse({"ok": True, "api_link": wdata.api_link_info(state),
+                             "reminder": REMOTE_WORKER_REMINDER})
 
     # ------------------------------------------------------------------ raw config
     def _config_path():

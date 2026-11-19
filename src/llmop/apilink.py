@@ -313,6 +313,25 @@ class ApiLink:
         return True
 
 
+def worker_ws_url(link_url: str) -> str:
+    """``<api-host>/<gate>`` -> the ``gateway_url`` a remote worker needs
+    (``wss://<api-host>/<gate>/worker/ws``). Never log the result."""
+    url = (link_url or "").rstrip("/")
+    if url.startswith("https://"):
+        url = "wss://" + url[len("https://"):]
+    elif url.startswith("http://"):
+        url = "ws://" + url[len("http://"):]
+    return f"{url}/worker/ws" if url else ""
+
+
+REMOTE_WORKER_REMINDER = (
+    "Remote workers (llmop worker run on another computer) connect through the API "
+    "link: set gateway_url in their worker config.json to the new address and restart "
+    "them. Workers still connected through the old link are disconnected once the old "
+    "link stops working. A worker on this computer is not affected."
+)
+
+
 def request_host_change(store: Any) -> None:
     """CLI side: ask a running node to replace its API tunnel."""
     store.kv_set(RESTART_KV, str(time.time()))

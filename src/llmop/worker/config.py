@@ -44,10 +44,16 @@ class WorkerConfig:
     pinned_clients: frozenset[bytes] = frozenset()  # 原始 32 位元組 Ed25519 公鑰；空＝信任閘道轉來的公鑰
 
 
+# The node's local listener (config listeners.local, default 8781) serves /worker/ws
+# without the secret path. A worker on another computer uses the API link instead:
+# wss://<API link>/worker/ws (R-11).
+DEFAULT_GATEWAY_URL = "ws://127.0.0.1:8781/worker/ws"
+
+
 def default_config() -> dict:
     """`llmop worker init` 寫出的設定範本：連到同一台機器上的閘道、使用本機 Ollama。"""
     return {
-        "gateway_url": "ws://127.0.0.1:8787/worker/ws",
+        "gateway_url": DEFAULT_GATEWAY_URL,
         "backends": [{"kind": "ollama", "base_url": "http://127.0.0.1:11434"}],
         "expose_models": [],
         "max_concurrency": 2,

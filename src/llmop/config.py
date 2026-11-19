@@ -62,7 +62,9 @@ class Quota:
     tokens_per_month: int = 0
     requests_per_minute: int = 0
     requests_per_day: int = 0
-    max_concurrent: int = 2
+    # None = not written in the config: v0.1 (no usage tables) uses 2, v0.2 with
+    # usage tables uses none (the scheduler limits concurrency per tier; R-04).
+    max_concurrent: int | None = None
     max_tokens_per_request: int = 0
 
     @classmethod

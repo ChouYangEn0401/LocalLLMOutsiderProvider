@@ -17,7 +17,8 @@ def config(**overrides):
 
 def test_default_config_is_valid():
     parsed = parse_config(default_config())
-    assert parsed.gateway_url == "ws://127.0.0.1:8787/worker/ws"
+    # R-11: the v0.2 node's local listener (B's old 8787 is gone)
+    assert parsed.gateway_url == "ws://127.0.0.1:8781/worker/ws"
     assert parsed.backends[0].kind == "ollama"
     assert parsed.max_concurrency == 2
     assert parsed.request_timeout == 1800

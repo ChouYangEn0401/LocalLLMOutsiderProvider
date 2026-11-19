@@ -130,6 +130,14 @@ async def _call(
         # 閘道本身一律回 JSON；非 JSON 的 5xx 來自前面的邊緣節點或隧道，當成網路失敗。
         if status >= 500:
             raise _Transient(f"HTTP {status}")
+        if status == 404:
+            # R-19：秘密路徑（gate）不對時閘道回純文字 404，最常見的原因是 API 連結換了。
+            raise ClientError(
+                "bad_response",
+                "閘道回了 404：API 連結可能已更換，請到帳號網站查看新的 API 連結，並更新 gateway_url"
+                "（the API link may have changed; get the new one from the account website）",
+                status=502,
+            )
         raise ClientError("bad_response", f"閘道回了無法解析的回應（HTTP {status}）", status=502)
     return status, data
 

@@ -10,7 +10,10 @@ Dequeue rules (TIERS 7.2):
 1. Tier order ``vip3 > vip2 > vip1 > normal > guest > low``. Running requests
    are never interrupted.
 2. Within a tier, accounts take turns (round robin); within an account, first
-   come first served. Each account is limited by its tier's ``max_concurrent``.
+   come first served. Each account is limited by its tier's ``max_concurrent``,
+   or by its own override (``slot(..., max_concurrent=N)`` or the
+   ``account_max_concurrent`` map, i.e. ``accounts.<name>.max_concurrent``); a
+   request queued as LOW always uses the ``low`` tier's limit.
 3. Fair share: of every ``fair_share_every`` grants, at least one goes to the
    longest-waiting NORMAL or GUEST request, if one is waiting. LOW is excluded.
 
@@ -22,6 +25,8 @@ HTTP 503), ``max_per_account`` (waiting requests per account ->
 ETA (TIERS 7.4): requests ahead x average duration of the last 20 runs / slots.
 
 The clock and the sleep function are injectable so tests can use a fake clock.
+:meth:`Scheduler.reconfigure` changes the numbers at run time (config hot reload);
+running requests are never touched.
 """
 
 from __future__ import annotations
@@ -81,14 +86,17 @@ class Ticket:
 
     __slots__ = (
         "account", "tier", "zone", "enqueued_at", "started_at", "finished_at",
-        "state", "_seq", "_future", "_scheduler",
+        "state", "max_concurrent", "_seq", "_future", "_scheduler",
     )
 
-    def __init__(self, scheduler: "Scheduler", account: str, tier: str, zone: str):
+    def __init__(self, scheduler: "Scheduler", account: str, tier: str, zone: str,
+                 max_concurrent: int | None = None):
         self._scheduler = scheduler
         self.account = account
         self.tier = tier
         self.zone = zone
+        # Per-account limit for this request (R-03); None = the tier's limit.
+        self.max_concurrent = max_concurrent
         self.enqueued_at: float | None = None
         self.started_at: float | None = None
         self.finished_at: float | None = None
@@ -142,24 +150,14 @@ class Scheduler:
         max_wait_seconds: Mapping[str, float] | None = None,
         fair_share_every: int = 6,
         max_concurrent: Mapping[str, int] | None = None,
+        account_max_concurrent: Mapping[str, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ):
-        if slots < 1:
-            raise ValueError("slots must be >= 1")
-        if max_length < 0 or max_per_account < 0:
-            raise ValueError("queue limits must be >= 0")
-        if fair_share_every < 1:
-            raise ValueError("fair_share_every must be >= 1")
-        self.slots = slots
-        self.max_length = max_length
-        self.max_per_account = max_per_account
-        self.max_wait_seconds = {**DEFAULT_MAX_WAIT, **(max_wait_seconds or {})}
-        self.fair_share_every = fair_share_every
-        self.max_concurrent = {**DEFAULT_MAX_CONCURRENT, **(max_concurrent or {})}
-        unknown = set(self.max_concurrent) - set(TIERS)
-        if unknown:
-            raise ValueError(f"unknown tier(s): {sorted(unknown)}")
+        self._configure(slots=slots, max_length=max_length, max_per_account=max_per_account,
+                        max_wait_seconds=max_wait_seconds, fair_share_every=fair_share_every,
+                        max_concurrent=max_concurrent,
+                        account_max_concurrent=account_max_concurrent)
         self._clock = clock
         self._sleep = sleep
         self._seq = itertools.count(1)
@@ -173,18 +171,84 @@ class Scheduler:
         self._since_fair = 0
         self._durations: deque[float] = deque(maxlen=DURATION_HISTORY)
 
+    def _configure(self, *, slots: int, max_length: int, max_per_account: int,
+                   max_wait_seconds: Mapping[str, float] | None, fair_share_every: int,
+                   max_concurrent: Mapping[str, int] | None,
+                   account_max_concurrent: Mapping[str, int] | None) -> None:
+        if slots < 1:
+            raise ValueError("slots must be >= 1")
+        if max_length < 0 or max_per_account < 0:
+            raise ValueError("queue limits must be >= 0")
+        if fair_share_every < 1:
+            raise ValueError("fair_share_every must be >= 1")
+        tiers = {**DEFAULT_MAX_CONCURRENT, **(max_concurrent or {})}
+        unknown = set(tiers) - set(TIERS)
+        if unknown:
+            raise ValueError(f"unknown tier(s): {sorted(unknown)}")
+        self.slots = slots
+        self.max_length = max_length
+        self.max_per_account = max_per_account
+        self.max_wait_seconds = {**DEFAULT_MAX_WAIT, **(max_wait_seconds or {})}
+        self.fair_share_every = fair_share_every
+        self.max_concurrent = tiers
+        self.account_max_concurrent = {
+            str(k): int(v) for k, v in (account_max_concurrent or {}).items() if int(v) >= 1}
+
     # ------------------------------------------------------------------ public
 
-    def slot(self, account: str, tier: str, zone: str) -> _Slot:
+    def reconfigure(
+        self,
+        *,
+        slots: int = 6,
+        max_length: int = 30,
+        max_per_account: int = 2,
+        max_wait_seconds: Mapping[str, float] | None = None,
+        fair_share_every: int = 6,
+        max_concurrent: Mapping[str, int] | None = None,
+        account_max_concurrent: Mapping[str, int] | None = None,
+    ) -> None:
+        """Apply new numbers (config hot reload, R-13). Running requests keep their
+        slot; waiting requests are judged by the new numbers (more slots start
+        waiting requests at once). The new ``max_wait_seconds`` applies to requests
+        that start waiting from now on."""
+        self._configure(slots=slots, max_length=max_length, max_per_account=max_per_account,
+                        max_wait_seconds=max_wait_seconds, fair_share_every=fair_share_every,
+                        max_concurrent=max_concurrent,
+                        account_max_concurrent=account_max_concurrent)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop: nobody can be waiting
+        self._pump()
+
+    def slot(self, account: str, tier: str, zone: str,
+             max_concurrent: int | None = None) -> _Slot:
         """Async context manager holding one slot; yields the :class:`Ticket`.
 
-        Raises ``QueueFull`` or ``QueueTimeout`` from ``__aenter__``. Cancelling
-        the waiting task removes the request from the queue."""
+        ``max_concurrent`` is this account's own limit (``accounts.<name>.max_concurrent``,
+        R-03); it is ignored for ``tier="low"``. Raises ``QueueFull`` or
+        ``QueueTimeout`` from ``__aenter__``. Cancelling the waiting task removes the
+        request from the queue."""
         if tier not in TIERS:
             raise ValueError(f"unknown tier {tier!r}")
         if zone not in ZONES:
             raise ValueError(f"unknown zone {zone!r}")
-        return _Slot(self, Ticket(self, account, tier, zone))
+        if max_concurrent is not None:
+            max_concurrent = int(max_concurrent)
+            if max_concurrent < 1:
+                max_concurrent = None
+        return _Slot(self, Ticket(self, account, tier, zone, max_concurrent))
+
+    def limit_for(self, ticket: Ticket) -> int:
+        """The per-account running limit that applies to ``ticket``."""
+        if ticket.tier == "low":
+            return self.max_concurrent["low"]
+        if ticket.max_concurrent is not None:
+            return ticket.max_concurrent
+        own = self.account_max_concurrent.get(ticket.account)
+        if own is not None:
+            return own
+        return self.max_concurrent[ticket.tier]
 
     @property
     def running(self) -> int:
@@ -333,8 +397,7 @@ class Scheduler:
         ticket.state = state
 
     def _eligible(self, ticket: Ticket) -> bool:
-        return (self._running_by_account.get(ticket.account, 0)
-                < self.max_concurrent[ticket.tier])
+        return self._running_by_account.get(ticket.account, 0) < self.limit_for(ticket)
 
     def _pick_by_priority(self) -> Ticket | None:
         for tier in TIERS:

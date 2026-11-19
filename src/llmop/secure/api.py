@@ -106,24 +106,19 @@ class SecureContext:
 
     @property
     def scheduler(self):
-        scheduler = getattr(self.state, "scheduler", None)
-        if scheduler is not None:
-            return scheduler
-        if self._scheduler is None:
-            from llmop.scheduler import TIERS, Scheduler
+        from llmop.app import scheduler_settings, sync_scheduler
 
-            cfg = self.config
-            q = getattr(cfg, "queue", None)
-            if q is None:
-                self._scheduler = Scheduler()
-            else:
-                tiers = getattr(cfg, "tiers", None) or {}
-                self._scheduler = Scheduler(
-                    slots=q.slots, max_length=q.max_length, max_per_account=q.max_per_account,
-                    max_wait_seconds=q.max_wait_seconds, fair_share_every=q.fair_share_every,
-                    max_concurrent={t: s.max_concurrent for t, s in tiers.items() if t in TIERS},
-                )
-        return self._scheduler
+        scheduler = getattr(self.state, "scheduler", None)
+        if scheduler is None:
+            if self._scheduler is None:
+                from llmop.scheduler import Scheduler
+
+                cfg = self.config
+                self._scheduler = Scheduler(**(scheduler_settings(cfg) if cfg is not None else {}))
+                self._scheduler.config_ref = cfg  # type: ignore[attr-defined]
+            scheduler = self._scheduler
+        sync_scheduler(scheduler, self.config)  # R-13: follow config reloads
+        return scheduler
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +180,16 @@ async def _read_body(request: Request) -> bytes:
             raise ProtocolError("payload_too_large")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _configured_model(ctx: SecureContext) -> str:
+    """``config.model`` ("" = not set)."""
+    model = getattr(ctx.config, "model", "") or ""
+    return model.strip() if isinstance(model, str) else ""
+
+
+def _same_model(asked: str, configured: str) -> bool:
+    return asked == configured or asked.removesuffix(":latest") == configured.removesuffix(":latest")
 
 
 def _peek_request_id(obj: object) -> str | None:
@@ -281,6 +286,7 @@ async def _chat(ctx: SecureContext, request: Request, trace: dict) -> JSONRespon
         raise
     header = envelope.header
     trace["request_id"], trace["model"] = header.request_id, header.model
+    single = _configured_model(ctx)
 
     # 2. API 金鑰（存在、未撤銷、未到期）與帳號。
     key, account = _authenticate(ctx, request)
@@ -298,6 +304,11 @@ async def _chat(ctx: SecureContext, request: Request, trace: dict) -> JSONRespon
     if hub.is_duplicate(key.id, header.request_id):
         raise ProtocolError("duplicate_request")
 
+    # 5b. 單一模型（R-09）：config 設了 model 時，標頭的 model 必須是它。標頭有簽章、
+    #     閘道不能改寫，但可以拒絕。
+    if single and not _same_model(header.model, single):
+        raise ProtocolError("model_unavailable", f"這個服務只提供模型 {single}")
+
     # 6. 准入：等級與兩個用量表（T-2）。
     try:
         lease = ctx.quota.acquire(account, key)
@@ -311,7 +322,8 @@ async def _chat(ctx: SecureContext, request: Request, trace: dict) -> JSONRespon
         scheduler = ctx.scheduler
         tier = _queue_tier(lease, key, account)
         who = usage_username(account, key)  # same queue identity as the direct /v1
-        slot = scheduler.slot(who, tier, ZONE)
+        slot = scheduler.slot(who, tier, ZONE,  # R-03: the account's own limit
+                              max_concurrent=getattr(lease, "max_concurrent", None))
     except BaseException:
         lease.release()
         raise
@@ -353,6 +365,7 @@ async def list_models(ctx: SecureContext, request: Request) -> JSONResponse:
         _authenticate(ctx, request)
     except ProtocolError as exc:
         return error_response(exc.code, exc.message)
+    single = _configured_model(ctx)  # R-09: only the configured model is listed
     data = [
         {
             "id": model,
@@ -362,6 +375,7 @@ async def list_models(ctx: SecureContext, request: Request) -> JSONResponse:
         }
         for conn in ctx.hub.workers.values()
         for model in conn.models
+        if not single or _same_model(model, single)
         for key_id, public_key in conn.keys.items()
     ]
     return JSONResponse({"object": "list", "data": data})

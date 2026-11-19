@@ -32,7 +32,8 @@ async def test_one_request_cannot_ask_the_backend_for_several_completions(make_s
     worker 把這個拒絕封裝回來（它是從 worker 那端回的 sealed bad_request，不是用戶端本機就
     擋下的請求），本機代理照 sdk.ClientError 的規則把「sealed 的後端錯誤」一律對映成 502。
     """
-    stack = await make_stack()
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(model="")
     status, data, _ = await stack.chat(MODELS["openai"], max_tokens=60, n=8)
     assert status == 502, f"應該被擋下卻放行了（HTTP {status}）：{data}"
     assert data["error"]["code"] == "bad_request"

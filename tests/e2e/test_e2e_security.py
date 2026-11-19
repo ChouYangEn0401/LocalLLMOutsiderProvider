@@ -46,7 +46,8 @@ async def test_gateway_never_sees_plaintext(make_stack, caplog, kind):
     caplog.set_level(logging.DEBUG)
     prompt_marker = f"E2E-PROMPT-{uuid.uuid4().hex}"
     reply_marker = f"E2E-REPLY-{uuid.uuid4().hex}"
-    stack = await make_stack()
+    # R-09: a two-model worker, so no single config.model (it would reject the other one)
+    stack = await make_stack(model="")
     backend = stack.backends[kind]
     backend.reply = f"答案在這裡：{reply_marker}"
 

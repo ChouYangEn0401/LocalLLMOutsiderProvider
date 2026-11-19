@@ -44,6 +44,9 @@ class WorkerConn:
     models: list[str]
     max_concurrency: int
     pending: dict[str, Job] = field(default_factory=dict, repr=False)
+    # sha256 of the API-link gate this WebSocket came in through (None = the local
+    # listener, no gate). R-08: closed once that gate stops working.
+    gate_hash: str | None = field(default=None, repr=False)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     async def send(self, frame: dict) -> None:
@@ -172,6 +175,18 @@ class Hub:
         if conn is not None:
             self._fail_pending(conn, "worker_disconnected", "閘道切斷了 worker 的連線")
             self._close_later(conn)
+
+    def disconnect_stale_gates(self, allows_hash: Callable[[str], bool]) -> list[WorkerConn]:
+        """R-08: close every worker connection that came in through an API-link gate
+        that no longer works (``allows_hash(gate_hash)`` is False: rotated and past
+        the grace period). Workers on the local listener (no gate) are kept.
+        Returns the closed connections."""
+        stale = [c for c in list(self.workers.values())
+                 if c.gate_hash is not None and not allows_hash(c.gate_hash)]
+        for conn in stale:
+            log.info("worker 經由舊的 API 連結連入，已切斷 worker_id=%s", conn.worker_id)
+            self.disconnect(conn.worker_id)
+        return stale
 
     async def close_all(self) -> None:
         """關閉所有 worker 連線並結束所有工作（閘道停止時）。"""

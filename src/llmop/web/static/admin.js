@@ -182,6 +182,7 @@
         button('更換 API 連結（只換秘密路徑）', 'danger', (b) => rotate(b, false, reason.value)),
         button('連主機名一起換', 'danger', (b) => rotate(b, true, reason.value))));
       parts.push(h('p', { class: 'small muted' }, '舊連結會失效（除非設定寬限期）；API 金鑰不受影響，使用者在入口網頁看到新連結。'));
+      parts.push(h('p', { class: 'small muted' }, '提醒：在別台電腦執行的 worker 是經由 API 連結連進來的；更換後要把它設定檔的 gateway_url 改成「新連結/worker/ws」（https 換成 wss）再重啟。經由舊連結連入的 worker 會在舊連結失效時被切斷。本機的 worker 不受影響。'));
     }
     const tn = o.tunnels || {};
     parts.push(h('h3', { class: 'section' }, '通道 (tunnels)'));
@@ -193,7 +194,8 @@
     const what = changeHost ? '連同主機名一起更換（會重啟 API 通道）' : '更換秘密路徑';
     if (!confirm('確定要' + what + '？舊的 API 連結會失效。')) return;
     await act(btn, 'POST', '/ui/api/admin/api-link/rotate',
-      { change_host: changeHost, reason: reason || '' }, '已更換 API 連結');
+      { change_host: changeHost, reason: reason || '' },
+      '已更換 API 連結。別台電腦的 worker 要改 gateway_url（新連結/worker/ws）。');
   }
 
   function renderServer(o) {

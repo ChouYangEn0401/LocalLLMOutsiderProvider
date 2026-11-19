@@ -58,6 +58,10 @@ def cmd_init(args: argparse.Namespace, home: Path) -> int:
         # 設定檔可能放後端的 api_key，所以也用 0600。
         paths.write_json(config_path, default_config(), secret=True)
         print(f"已建立設定檔 {config_path}；請確認 gateway_url 與 backends 後再執行 llmop worker run。")
+        print("  gateway_url 預設是同一台電腦的閘道（ws://127.0.0.1:8781/worker/ws，"
+              "config 的 listeners.local）。")
+        print("  在別台電腦上請改成 wss://<API 連結>/worker/ws（API 連結含秘密路徑，"
+              "在本機控制台或 llmop tunnel show-api 查看；更換 API 連結後要跟著改）。")
     return 0
 
 

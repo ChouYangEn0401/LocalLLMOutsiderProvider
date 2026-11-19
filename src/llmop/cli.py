@@ -974,6 +974,10 @@ def cmd_rotate_api(args) -> int:
             _out(f"     the old link keeps working for {args.grace:g} more seconds")
         else:
             _out("     the old link stopped working. API keys are unchanged.")
+        from .apilink import REMOTE_WORKER_REMINDER, worker_ws_url
+
+        _out(f"     remote workers: gateway_url = {worker_ws_url(url)}")
+        _out(f"REMINDER: {REMOTE_WORKER_REMINDER}")
     finally:
         store.close()
     return 0

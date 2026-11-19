@@ -111,11 +111,23 @@ async def _handshake(ws: WebSocket, store, hub: Hub) -> WorkerConn:
         keys=keys,
         models=models,
         max_concurrency=frame["max_concurrency"],
+        gate_hash=_gate_hash(ws),
     )
     if hub.attach(conn):
         log.info("worker 的舊連線被取代 worker_id=%s", worker.id)
     await conn.send(protocol.ready())
     return conn
+
+
+def _gate_hash(ws: WebSocket) -> str | None:
+    """Hash of the API-link gate this connection used (None on the local listener)."""
+    from llmop.netguard import GATE_HASH_SCOPE_KEY
+
+    try:
+        value = ws.scope.get(GATE_HASH_SCOPE_KEY)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 async def _serve(conn: WorkerConn, store, hub: Hub) -> None:

@@ -23,23 +23,29 @@ def _is_int(v: Any) -> bool:
 
 def text_chars(value: Any) -> int:
     """Characters in a prompt-like value: a string, content parts, a list of strings,
-    or token ids (each id counts as one token)."""
-    if isinstance(value, str):
-        return len(value)
-    if _is_int(value):
-        return CHARS_PER_TOKEN
-    if isinstance(value, list):
-        return sum(text_chars(v) for v in value)
-    if isinstance(value, dict):  # content part: {"type": "text", "text": ...}
-        text = value.get("text")
-        return len(text) if isinstance(text, str) else 0
-    return 0
+    or token ids (each id counts as one token).
+
+    Iterative (R-21): arbitrarily deep nested lists cannot raise RecursionError."""
+    total = 0
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif _is_int(item):
+            total += CHARS_PER_TOKEN
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, dict):  # content part: {"type": "text", "text": ...}
+            text = item.get("text")
+            total += len(text) if isinstance(text, str) else 0
+    return total
 
 
 def _json_chars(value: Any) -> int:
     try:
         return len(json.dumps(value, ensure_ascii=False))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return 0
 
 

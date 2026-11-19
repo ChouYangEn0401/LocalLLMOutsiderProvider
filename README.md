@@ -177,6 +177,8 @@ llmop tunnel rotate-api --change-host --grace 600
 - **不要把 LLM 伺服器（11434、1234）或本機控制台（8781）對外。** 只用 `llmop serve` 自己開的兩個通道。
 - **`image_url` 沒有過濾（v0.3 才處理）。** 閘道原樣轉送訊息裡的 `image_url`；如果你的後端（例如 vLLM、部分 LM Studio
   版本）會自己去下載網址，持有 key 的人就能讓後端去連你內網的網址（SSRF）。v0.2 請用不會抓遠端圖片的後端，或只發 key 給信任的人。
+- **VIP 帳號的 API 金鑰只能在本機控制台建立**（AI 預設，R-10）：VIP 沒有或只有很高的用量上限，帳號網站（外網）拒絕 VIP I／II／III 建立 key；一般帳號照常在帳號網站自己建立。
+- **更換 API 連結後，別台電腦的 worker 要改設定。** 它們的 `gateway_url` 是 `wss://<API 連結>/worker/ws`；經由舊連結連入的 worker 在舊連結失效時會被切斷（本機的 worker 不受影響）。
 - Docker 與 CI 檔案是 v0.1 時代的，還沒有為 v0.2 更新（[docs/HANDOFF.md](docs/HANDOFF.md)）。
 
 ## 安全邊界

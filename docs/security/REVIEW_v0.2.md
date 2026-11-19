@@ -3,6 +3,7 @@
 > 2026-11-19。複查者：沒寫過任何 T-M0～T-11 任務的 Opus。分支 `dev`（未 commit，交 dispatcher）。
 > 依據：`docs/plan/DISPATCH.md` 第 1–3 節與 T-R 簡報、`MERGE_PLAN.md` 第 6 節（27 類攻擊）與第 10 節（決策表）、
 > `TIERS_AND_USAGE_RULES.md`、`TODO.md`（T1）、`docs/HANDOFF.md`。前面執行者的報告一律當成「聲明」，逐項回到程式碼驗證。
+> **T-F 之後的狀態見第 9 節「修正後狀態」**（第 2 節的「狀態」欄是複查當時的狀態）。
 
 ## 1. 結論
 
@@ -224,3 +225,39 @@ public-api 沒有登入頁；深度 10 萬層的 JSON → 修正前 500（R-05�
   `--change-host` 換主機名都只在假通道下測過。uvicorn 從 `X-Forwarded-For` 取的 IP 是否正是 Cloudflare 附加的那一個（影響登入限流）沒實測。
 - **兩台機器**：遠端 worker 走 `wss://` 與 TLS 沒驗證。
 - 這份報告不含效能或長時間穩定性測試。
+
+## 9. 修正後狀態
+
+> 2026-11-19，T-F（修正複查發現的問題）。分支 `dev`，未 commit。回歸測試主要在 `tests/security/test_sec_fixes.py`
+> （以 `test_rNN_` 開頭），R-09 在 `tests/secure/test_single_model.py`；`test_sec_known_gaps.py` 的兩個 strict xfail 已拿掉標記，
+> 現在是一般測試。全套：**1257 passed, 2 xfailed → 1282 passed, 0 xfailed**。
+
+| # | 狀態 | 修正內容 |
+|---|---|---|
+| R-01 | 已修（T-R） | 見第 2 節 |
+| R-02 | 已修（T-R） | 見第 2 節 |
+| R-03 | **已修** | `Scheduler.slot(..., max_concurrent=)` 存進 `Ticket`，`_eligible` 優先用它；`Lease.max_concurrent` 來自用量表的准入結果（等級值或帳號覆寫），`api/proxy.py` 與 `secure/api.py` 都傳進去；`make_scheduler` 另外帶入每個帳號的有效值。排成 LOW 的請求一律用 `low` 等級的上限（1） |
+| R-04 | **已修** | 範例設定的 `default_quota` 只留 `requests_per_minute: 20`；`Quota.max_concurrent` 預設改成「未設定」，有用量表時不套用 v0.1 內建的同時 2 筆（同時上限交給排程器，VIP III＝3、排隊中的不算執行中），沒有用量表（v0.1）時仍是 2。**但書**：設定檔裡明寫的 v0.1 上限（每日 token、`max_concurrent` 等）仍然生效，寫了 `max_concurrent` 時仍會把排隊中的算進去（既有測試 `test_e2e_quota_defects` 依賴此行為） |
+| R-05 | 已修（T-R） | 見第 2 節 |
+| R-06 | 已修（T-R） | 見第 2 節 |
+| R-07 | 延後 v0.3 | README 已註明（不變） |
+| R-08 | **已修** | `GateMiddleware` 把 WebSocket 用的 gate 雜湊放進 scope，`WorkerConn.gate_hash` 記下；節點每秒的檢查在舊 gate 失效（含寬限期結束）後切斷經由舊 gate 連入的 worker（本機入口連入的不受影響），並在主控台印出新的 worker 位址與提醒。`llmop tunnel rotate-api` 的輸出與控制台的「更換 API 連結」也提醒要改遠端 worker 的 `gateway_url`。v0.3 仍可考慮給 worker 一條不輪替的路徑 |
+| R-09 | **已修** | `config.model` 有設時，加密路徑在驗證簽章後、准入前拒絕 `header.model` 不同的請求（404 `model_unavailable`，不記用量）；`/e2e/v1/models` 只列這個模型。e2e 測試裡刻意用兩個模型的 worker 的 6 個測試改成 `make_stack(model="")`（斷言不變） |
+| R-10 | **已修（AI 預設）** | 帳號網站（`surface="public"`）拒絕 VIP I／II／III 建立 key（403 `local_only`），只能在本機控制台建立；一般帳號不變。README「一定要知道的限制」一行說明 |
+| R-11 | **已修** | `llmop worker init` 的預設 `gateway_url` 改成 `ws://127.0.0.1:8781/worker/ws`（`listeners.local` 的預設），並印出「遠端請用 `wss://<API 連結>/worker/ws`」。`tests/worker/test_worker_config.py` 的預期值跟著改（唯一改動的既有斷言之一，見下） |
+| R-12 | **已修** | 範例設定的後端 `max_concurrency` 改成 6，與 `queue.slots: 6` 一致（全新安裝不再每次警告），註解說明要與後端自己的平行設定一致、llama.cpp／LM Studio 會把 context 平分給各槽位（TODO T1）。真的不一致時警告照舊。「有排程器時後端 semaphore 被略過」未改 |
+| R-13 | **已修** | `Scheduler.reconfigure()`；`sync_scheduler()` 在設定物件換了（熱重載）時更新名額、排隊上限、各等級與各帳號的同時上限。直連每筆請求、加密路徑與節點每秒的檢查都會呼叫；執行中的請求不受影響 |
+| R-14 | 延後 v0.3 | 排隊中變成 LOW 不換順位（HANDOFF 已列） |
+| R-15 | **已修（部分）** | SSE 標頭已送出、開始讀後端之後、第一個 token 之前取消，記提示的估算值（`usage_source=estimate`）並扣用量表。標頭送出之前就斷線仍記 0（既有測試 `test_streaming_response_never_sent_still_cleans_up` 的行為；HANDOFF 已列） |
+| R-16 | 接受 | 不變（HANDOFF 已列） |
+| R-17 | **已修** | public-ui 與 public-api 的 `/health` 只回 `{"status":"ok"}`（本機入口照舊帶版本）；靜態檔的快取參數改成版本的雜湊前 10 碼，不再是版本號 |
+| R-18 | 未修（決策落差） | D7「管理員可代發」只有 GUEST key（HANDOFF 已列） |
+| R-19 | **已修** | 用戶端遇到純文字 404 時回「閘道回了 404：API 連結可能已更換，請到帳號網站查看新的 API 連結，並更新 gateway_url」 |
+| R-20 | **已修** | named tunnel 的 token 改用 `TUNNEL_TOKEN` 環境變數傳給 cloudflared（`tunnel run --token` 支援這個變數），命令列不再出現 token。`tests/test_tunnel.py` 的預期命令跟著改（見下） |
+| R-21 | **已修** | `text_chars` 改成迭代；`_json_chars` 另外接住 `RecursionError`。10 萬層的巢狀陣列也不會出錯 |
+
+**改動的既有斷言（兩處，都是因為修正本身改變了被斷言的值）**：`tests/worker/test_worker_config.py::test_default_config_is_valid`
+（8787 → 8781，R-11）；`tests/test_tunnel.py::test_named_tunnel_uses_token_and_configured_public_url`（命令列不再有 `--token tok-123`，
+改為斷言 `TUNNEL_TOKEN` 環境變數且命令列沒有 token，R-20）。其餘既有測試的斷言都沒動。
+
+**沒有驗證到的**：真的 cloudflared 讀 `TUNNEL_TOKEN`（依官方文件，沒實機跑）；Windows；遠端 worker 被切斷後的重連訊息只在 worker 的 log。

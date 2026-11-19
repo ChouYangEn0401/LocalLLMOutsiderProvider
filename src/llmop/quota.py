@@ -12,9 +12,14 @@ Day/month boundaries use the server's local time zone.
 v0.2 (TIERS_AND_USAGE_RULES.md): when a :class:`llmop.usage.UsageManager` is given
 (``tables=``), :meth:`QuotaManager.acquire` also judges the caller by tier and the two
 usage tables (1.5-hour bucket, weekly table / GUEST budget). VIP II / III are never
-blocked by the tables. The legacy ``default_quota`` limits above stay in force when
-they are set (``requests_per_minute`` is the documented safety cap). Charging the
-tables after a request is :meth:`UsageManager.charge` (or :meth:`QuotaManager.settle`).
+blocked by the tables. Charging the tables after a request is
+:meth:`UsageManager.charge` (or :meth:`QuotaManager.settle`).
+
+Legacy ``default_quota`` with tables (R-04): only limits that are written in the
+config apply (``requests_per_minute`` is the documented safety cap). In particular the
+v0.1 built-in ``max_concurrent`` of 2 does NOT apply: concurrency is the scheduler's
+job (tiers' ``max_concurrent``, VIP III = 3), and a request waiting in the queue is
+not "running". Without tables (v0.1) the built-in default of 2 still applies.
 """
 
 from __future__ import annotations
@@ -28,6 +33,9 @@ from datetime import datetime
 from .config import Account
 from .store import ApiKey, Store
 from .usage import UsageManager
+
+
+LEGACY_MAX_CONCURRENT = 2  # v0.1 default when no usage tables are wired
 
 
 class QuotaDenied(Exception):
@@ -73,6 +81,9 @@ class Lease:
     queue_tier: str | None = None
     state: str | None = None
     subject: str | None = None
+    # The account's own running limit for the scheduler (tier value or the account's
+    # override, R-03); None without tables.
+    max_concurrent: int | None = None
     _inflight_key: str | None = None
 
     def release(self) -> None:
@@ -91,6 +102,13 @@ class QuotaManager:
         self._recent: dict[str, deque] = defaultdict(deque)  # request timestamps (60 s window)
 
     # ------------------------------------------------------------ helpers
+    def legacy_max_concurrent(self, q) -> int:
+        """The v0.1 per-account concurrency cap: what the config says, else 2 without
+        usage tables and none (0) with them (the scheduler limits concurrency)."""
+        if q.max_concurrent is None:
+            return 0 if self.tables is not None else LEGACY_MAX_CONCURRENT
+        return int(q.max_concurrent or 0)
+
     def _rpm_window(self, username: str, now: float) -> deque:
         q = self._recent[username]
         while q and q[0] <= now - 60:
@@ -119,7 +137,7 @@ class QuotaManager:
                 "tokens_per_month": q.tokens_per_month,
                 "requests_per_minute": q.requests_per_minute,
                 "requests_per_day": q.requests_per_day,
-                "max_concurrent": q.max_concurrent,
+                "max_concurrent": self.legacy_max_concurrent(q),
                 "max_tokens_per_request": q.max_tokens_per_request,
             },
             "remaining": {
@@ -194,10 +212,11 @@ class QuotaManager:
                     f"Too many requests: limit is {q.requests_per_minute} per minute.",
                     retry_after=retry,
                 )
-            if q.max_concurrent and self._inflight[u] >= q.max_concurrent:
+            max_concurrent = self.legacy_max_concurrent(q)
+            if max_concurrent and self._inflight[u] >= max_concurrent:
                 raise QuotaDenied(
                     "rate_limit_exceeded",
-                    f"Too many requests at the same time: limit is {q.max_concurrent}.",
+                    f"Too many requests at the same time: limit is {max_concurrent}.",
                     retry_after=2,
                 )
             window.append(now)
@@ -212,6 +231,7 @@ class QuotaManager:
         if adm is not None:
             lease.tier, lease.queue_tier = adm.tier, adm.queue_tier
             lease.state, lease.subject = adm.state, adm.subject
+            lease.max_concurrent = adm.max_concurrent
         return lease
 
     def _guest_lease(self, adm) -> Lease:
@@ -225,7 +245,7 @@ class QuotaManager:
             self._inflight[adm.subject] += 1
         return Lease(username="", max_tokens=None, _mgr=self, tier=adm.tier,
                      queue_tier=adm.queue_tier, state=adm.state, subject=adm.subject,
-                     _inflight_key=adm.subject)
+                     max_concurrent=adm.max_concurrent, _inflight_key=adm.subject)
 
     def settle(self, tokens: int, account: Account | None, key: ApiKey | None = None) -> dict | None:
         """Charge a finished request to the usage tables (no-op without tables)."""

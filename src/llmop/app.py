@@ -78,16 +78,52 @@ class AppState:
         return got[0] if got else ""
 
 
-def make_scheduler(cfg: Config):
-    """The global slot scheduler from ``queue`` and the tiers' ``max_concurrent``."""
-    from .scheduler import TIERS, Scheduler
+def scheduler_settings(cfg: Any) -> dict:
+    """Scheduler keyword arguments from ``queue``, the tiers' ``max_concurrent`` and
+    each account's effective ``max_concurrent`` (tier value or the account's own
+    override, R-03)."""
+    from .scheduler import TIERS
 
-    q = cfg.queue
-    return Scheduler(
-        slots=q.slots, max_length=q.max_length, max_per_account=q.max_per_account,
-        max_wait_seconds=q.max_wait_seconds, fair_share_every=q.fair_share_every,
-        max_concurrent={t: s.max_concurrent for t, s in (cfg.tiers or {}).items() if t in TIERS},
-    )
+    q = getattr(cfg, "queue", None)
+    out: dict = {}
+    if q is not None:
+        out.update(slots=q.slots, max_length=q.max_length, max_per_account=q.max_per_account,
+                   max_wait_seconds=dict(q.max_wait_seconds), fair_share_every=q.fair_share_every)
+    tiers = getattr(cfg, "tiers", None) or {}
+    out["max_concurrent"] = {t: s.max_concurrent for t, s in tiers.items() if t in TIERS}
+    accounts = getattr(cfg, "accounts", None) or {}
+    out["account_max_concurrent"] = {
+        name: acc.limits.max_concurrent for name, acc in accounts.items()
+        if getattr(acc, "limits", None) is not None and acc.limits.max_concurrent}
+    return out
+
+
+def make_scheduler(cfg: Config):
+    """The global slot scheduler from ``queue``, the tiers' and the accounts'
+    ``max_concurrent``. :func:`sync_scheduler` keeps it in step with config reloads."""
+    from .scheduler import Scheduler
+
+    sched = Scheduler(**scheduler_settings(cfg))
+    sched.config_ref = cfg  # type: ignore[attr-defined]
+    return sched
+
+
+def sync_scheduler(scheduler: Any, cfg: Any) -> bool:
+    """R-13: when the config object changed (hot reload), give the scheduler the new
+    slots / limits. Running requests are untouched. Returns True if it changed."""
+    if scheduler is None or cfg is None or not hasattr(scheduler, "config_ref"):
+        return False  # not built from a config (tests pass their own): leave it alone
+    if scheduler.config_ref is cfg:
+        return False
+    reconfigure = getattr(scheduler, "reconfigure", None)
+    if reconfigure is None:
+        return False
+    try:
+        reconfigure(**scheduler_settings(cfg))
+    except (ValueError, TypeError) as exc:  # keep the old numbers
+        log.warning("scheduler: new queue settings not applied (%s)", exc)
+    scheduler.config_ref = cfg
+    return True
 
 
 def build_state(config: Config, *, store: Store | None = None, transport=None,
@@ -255,7 +291,8 @@ class RedactedAccessLog:
 
 
 # --------------------------------------------------------------------------- apps
-def _new_app(state: AppState, lifespan_extra: Callable | None = None) -> FastAPI:
+def _new_app(state: AppState, lifespan_extra: Callable | None = None, *,
+             public: bool = False) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         state.store.purge_expired_sessions()
@@ -271,6 +308,8 @@ def _new_app(state: AppState, lifespan_extra: Callable | None = None) -> FastAPI
 
     @app.get("/health", include_in_schema=False)
     async def health() -> JSONResponse:
+        if public:  # R-17: public entrances do not tell the version
+            return JSONResponse({"status": "ok"})
         return JSONResponse({"status": "ok", "version": __version__})
 
     return app
@@ -344,7 +383,7 @@ def _create_local(state: AppState, port: int | None):
 def _create_public_ui(state: AppState):
     from .web import build_web_router
 
-    app = _new_app(state)
+    app = _new_app(state, public=True)
     app.include_router(build_web_router(state, "public"))
     inner = BodyLimitMiddleware(app, PUBLIC_UI_BODY_LIMIT)
     return PublicHostMiddleware(inner, lambda: ui_hosts(state))
@@ -355,7 +394,7 @@ def _create_public_api(state: AppState):
 
     if state.api_link is None:
         raise ValueError("the public API app needs state.api_link (the secret path)")
-    app = _new_app(state)
+    app = _new_app(state, public=True)
     app.include_router(build_api_router(state, "public"))
     sec = secure_router(state)
     if sec is not None:

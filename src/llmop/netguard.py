@@ -258,11 +258,20 @@ class GateState:
     def allows(self, gate: str, now: float) -> bool:
         if not gate:
             return False
-        digest = gate_hash(gate)
+        return self.allows_hash(gate_hash(gate), now)
+
+    def allows_hash(self, digest: str, now: float) -> bool:
+        """Same as :meth:`allows` for a gate already hashed (a WebSocket remembers
+        the hash of the gate it came in through, R-08)."""
+        if not digest:
+            return False
         ok = bool(self.current_hash) and hmac.compare_digest(digest, self.current_hash)
         if self.previous_hash and now < self.grace_until:
             ok = hmac.compare_digest(digest, self.previous_hash) or ok
         return ok
+
+
+GATE_HASH_SCOPE_KEY = "llmop.gate_hash"
 
 
 class GateMiddleware:
@@ -291,6 +300,10 @@ class GateMiddleware:
             return
         new_scope = dict(scope)
         new_scope["path"] = rest
+        if scope["type"] == "websocket":
+            # R-08: the connection remembers which gate it used, so it can be closed
+            # once that gate stops working (rotation + grace period).
+            new_scope[GATE_HASH_SCOPE_KEY] = gate_hash(gate)
         raw = scope.get("raw_path")
         if isinstance(raw, (bytes, bytearray)):
             raw_gate, raw_rest = _split_raw(bytes(raw))

@@ -45,7 +45,13 @@ backends:
     type: ollama
     base_url: http://127.0.0.1:11434   # in Docker compose: http://ollama:11434
     models: ["*"]                      # expose all models, or list e.g. ["qwen3.5:9b"]
-    max_concurrency: 2                 # requests sent to this server at once (protect the GPU)
+    max_concurrency: 6                 # requests sent to this server at once; keep it equal to
+                                       # queue.slots below and to the server's own parallel
+                                       # setting (Ollama: OLLAMA_NUM_PARALLEL, llama.cpp: --parallel,
+                                       # LM Studio: max concurrent predictions). llama.cpp and
+                                       # LM Studio split the context over the parallel slots
+                                       # (6 slots = 1/6 of the context each); lower both numbers
+                                       # if long prompts fail.
     timeout: 600                       # seconds without progress before giving up
     # Ollama's default context is small (4096 on many builds) and it SILENTLY drops
     # the start of long prompts. Ollama's /v1 API ignores per-request num_ctx, so set
@@ -64,14 +70,12 @@ model_aliases:
 
 # v0.1 limits, applied to every account unless the account overrides a value.
 # 0 = unlimited. In v0.2 the tiers and the two usage meters below decide who may
-# send how much; requests_per_minute / max_tokens_per_request stay as safety limits.
+# send how much and how many requests run at once (tiers.*.max_concurrent);
+# requests_per_minute stays as a safety limit. Only write the other v0.1 keys
+# (tokens_per_day, tokens_per_month, requests_per_day, max_concurrent,
+# max_tokens_per_request) if you really want an extra cap on top of the tiers.
 default_quota:
-  tokens_per_day: 200000
-  tokens_per_month: 3000000
   requests_per_minute: 20
-  requests_per_day: 0
-  max_concurrent: 2
-  max_tokens_per_request: 4096
 
 # Accounts. tier: vip3 | vip2 | vip1 | normal (default normal); any tier value
 # (bucket, weekly, max_concurrent, ...) can be overridden per account.
@@ -163,7 +167,8 @@ tiers:
 # Queue for the shared slots.
 queue:
   slots: 6                 # requests running at once. Must match the backend's parallel
-                           # slots: llama.cpp / LM Studio split the context over them
+                           # slots (backends[].max_concurrency above): llama.cpp / LM Studio
+                           # split the context over them (docs/plan/TODO.md T1)
   max_length: 30           # whole queue; more -> 503
   max_per_account: 2       # waiting requests per account; more -> 429
   max_wait_seconds: { public: 60, local: 600 }

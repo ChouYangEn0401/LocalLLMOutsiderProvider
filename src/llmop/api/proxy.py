@@ -229,7 +229,12 @@ class _Call:
         """Wait for a slot: the global scheduler when there is one (may raise
         QueueFull / QueueTimeout), else the backend's own semaphore."""
         if self.scheduler is not None:
-            cm = self.scheduler.slot(self.usage_name, self.tier, self.zone)
+            from ..app import sync_scheduler
+
+            sync_scheduler(self.scheduler, self.state.config)  # R-13: follow config reloads
+            # R-03: the account's own max_concurrent (tier value or its override)
+            cm = self.scheduler.slot(self.usage_name, self.tier, self.zone,
+                                     max_concurrent=getattr(self.lease, "max_concurrent", None))
             self.ticket = cm.ticket
             await cm.__aenter__()
             self._slot_cm = cm
@@ -754,9 +759,13 @@ class _StreamRelay:
                     await resp.aclose()
                 except Exception:
                     log.debug("error closing upstream stream", exc_info=True)
+        reading = self.chunks is not None  # SSE headers sent, upstream being read
         if self.usage is not None:
             self.call.set_usage(*self.usage, "backend")
-        elif self.events or status == "ok":
+        elif self.events or status == "ok" or (status == "cancelled" and reading):
+            # R-15: the client left after the backend started answering but before the
+            # first token: the prompt was (being) processed, so it is charged (estimate).
+            # A client gone before the response even started is still not charged.
             self.call.set_usage(self.call.prompt_estimate, chars_to_tokens(self.completion_chars),
                                 "estimate")
         await self.call.finish(status, error)
