@@ -1,6 +1,6 @@
 # 合併計劃書 — 把「直連版（A）」與「端對端加密版（B）」合成一個產品
 
-> 狀態：**草稿，等擁有者回覆決策（第 4 節 D1–D14）**。日期：2026-11-19。撰寫：規劃者（Fable）。
+> 狀態：**草稿第 2 版**。已定案：**D4、D5、D14**。待回覆：D1–D3、D6–D13、D15–D19（圖解與優缺點表見 `docs/MERGE_DECISIONS.html`，即已發佈的「llmop 整合決策板」）。**擁有者的流程：全部決策定案後才派工，M0 尚未開始。**日期：2026-11-19。撰寫：規劃者（Fable）。
 > 本文件只規劃，不改任何原始碼。執行者是 Opus 5.5（medium effort），由 dispatcher 派工。
 
 | 代號 | 來源 | 一句話 |
@@ -250,6 +250,70 @@ A 的網頁當底，新增 `/ui/settings`（僅 admin）。左側分頁：
 - 設定區經 tunnel 能不能用，見 D4。
 - 加密方案下，閘道上的 playground 停用（閘道讀不到明文）；改由「本機用戶端」節點的頁面提供（D9）。
 
+### 2.7 外網唯讀、本機才能改（D4 定案）
+
+**兩個監聽面**（D15 建議 A；若選 B 則同一個 port 上用下面的 `is_local()` 區分）：
+
+| 面 | 位址 | 誰連得到 | 有哪些路由 |
+|---|---|---|---|
+| 公開面 | `127.0.0.1:8780`，tunnel **只**指向它 | 網路上任何人 | `/v1/*`、`/e2e/v1/*`、`/worker/ws`、登入、使用者自己的頁面（依 D16）、管理與設定的 **GET**（唯讀、已遮蔽） |
+| 本機控制台 | `127.0.0.1:8781` | 只有這台電腦 | 上面全部，加上所有寫入與操作端點 |
+
+規則（任務 S1 做成 `src/llmop/netguard.py`，全專案只有這一個判斷點）：
+
+1. **`is_local(request)` 必須同時成立**：
+   - TCP 對端是 loopback（看原始對端，不看被 `proxy_headers` 改寫過的值；本機控制台那個 uvicorn **關閉** `proxy_headers`）。
+   - 沒有任何轉送標頭：`cf-connecting-ip`、`cf-ray`、`cf-visitor`、`cdn-loop`、`x-forwarded-for`、`x-forwarded-host`、`x-forwarded-proto`、`x-real-ip`、`forwarded`、`via`。
+   - `Host` 標頭在白名單：`127.0.0.1:<port>`、`localhost:<port>`、`[::1]:<port>`（擋 DNS rebinding）。
+   - 有 `Origin` 時必須是同一個本機來源；`Sec-Fetch-Site` 不可為 `cross-site`。
+2. **公開面的路由表是白名單**：`create_app(surface="public")` 不註冊任何寫入路由。有一個測試列舉公開面全部路由，確認管理 / 設定類只有 `GET`，而且對每一條送 `POST / PUT / PATCH / DELETE` 都得到 404 或 405。
+3. **公開面也檢查 `Host`**：只接受 `public_url` 的主機名、目前 tunnel 的主機名、或 loopback；其他一律 421。
+4. **登入階段記錄來源**：`sessions` 加一欄 `origin = local | remote`。`remote` 的 session 即使被拿到本機控制台用，也不能寫（要在本機重新登入）；`local` 的 cookie 不會被送到 tunnel 網域（主機名不同）。
+5. **唯讀也要遮蔽**：外網看到的管理頁不含任何秘密、後端的內部網址、設定檔路徑、原始 YAML、使用者的來源 IP。「進階」分頁（原始 YAML、備份）在公開面不存在。
+6. **tunnel 管理器拒絕指向本機控制台的 port**，也拒絕指向任何後端 port（`tunnel.py` 啟動前檢查）。
+7. **唯讀是否連看都不給**：設定 `server.remote_admin: readonly | off`（預設 `readonly`，依擁有者決定）。
+8. 已知限制寫進文件：同一台電腦上的其他程式或其他 Windows 帳號算「本機」（檢查表 6b、26）。
+
+### 2.8 優先佇列與 VIP（D5 定案）
+
+**等級**（`accounts.<名稱>.tier`，預設 `normal`）：
+
+| 等級 | 額度 | 出隊順序 | 用途 |
+|---|---|---|---|
+| `vip` | **不檢查** token / 請求次數額度（用量照記）；同時請求上限見 D19 | 最先 | 擁有者自己、SYNOX |
+| `normal` | 照帳號額度 | 其次 | 朋友 |
+| `low` | 照帳號額度 | 最後 | 管理員指定的帳號；或額度用完後自動降級（D17） |
+
+**佇列在哪裡**：每個「GPU 資源」一個排程器，取代現在單純的 `asyncio.Semaphore`（`backends/base.py:161`，先到先得、無上限、無逾時）。
+- 直連面：每個後端一個，名額 = `max_concurrency`。
+- 加密面：閘道的 hub 對每台 worker 一個，名額 = worker 公告的 `max_concurrency`。閘道有空位才把密文送給 worker，取代 B 現在的「`8 × max_concurrency` 先塞過去」。等級只是閘道已經知道的帳號屬性，不增加任何洩漏。
+- 同一台機器同時開直連與本機 worker（`custom`）時，node 讓兩者共用同一個排程器，避免兩邊各自以為 GPU 有空。
+
+**出隊規則**：
+1. 等級高的先（`vip` > `normal` > `low`）。不會中斷正在跑的請求。
+2. 同等級內**按使用者輪流**：挑「目前執行中 + 最近剛被服務」最少的使用者；同一個使用者內先到先得。一個人連送 10 筆不會擋住只送 1 筆的人。
+3. 防餓死：見 D18。
+
+**上限與滿了怎麼辦**（`config.yaml` 的 `queue:` 區段，都可調）：
+
+| 設定 | 預設 | 超過時 |
+|---|---|---|
+| `max_length`（每個資源排隊總數） | 32 | **503** `queue_full` + `Retry-After`（依排隊數 × 近期平均耗時估算） |
+| `max_per_user`（每人排隊數；VIP 另計） | 4 | **429** `queue_limit` + `Retry-After` |
+| `max_wait_seconds`：串流 / 加密面 | 600 | 503 `queue_timeout` + `Retry-After` |
+| `max_wait_seconds`：直連面非串流 | **60** | 同上。原因：Cloudflare 約 100 秒沒回應就切斷（524），不能排太久 |
+
+OpenAI SDK 對 429 與 503 都會依 `Retry-After` 自動重試，用戶端不用改。VIP 不受 `max_length` 影響（但受 D19 的同時上限）。
+
+**串流與長請求**：
+- 直連面串流：先回 SSE 標頭，排隊期間每 10 秒送一行註解（`: queued 3`）保活；排到才開始出字。排隊逾時則送 SSE 錯誤事件。
+- 加密面：非串流沿用 202 + 輪詢，`pending` 回應多帶 `queue_position`；串流同樣送保活。
+- 用戶端在排隊中斷線：立刻從佇列移除，不佔名額、不記用量。
+
+**事後記帳**：請求結束（成功、失敗、取消）才寫一筆 `usage_events`，多記 `tier` 與 `queue_ms`。准入時只看「目前已記的用量是否已超過額度」（A 現行作法），不預扣。
+
+**管理**：YAML 的 `accounts.<名稱>.tier` 與 `queue:`；設定區「帳號與額度」分頁加等級下拉選單、「概觀」加即時佇列面板（每個資源：執行中 / 各等級排隊數 / 平均等待）。改等級是寫入，只能在本機做（D4）。
+
 ---
 
 ## 3. 合併方法
@@ -336,17 +400,17 @@ git commit -m "merge: bring in E2E gateway/worker/client (B) alongside the direc
 - C：做，但預設關閉。
 - **建議 A**。後果：閘道與 Cloudflare 會多看到「回覆的大致長度與出字速度」；內容仍然看不到。約一個階段的工作量。
 
-**D4. 管理與設定頁能不能從外網（經 tunnel）使用？**
-- A：完全只限本機（B 現在的預設）。遠端管理要自己用 SSH 轉送。
-- B：登入後可從外網**看**管理頁（用量、key、worker 狀態），但**改設定只限本機**。
-- C：登入後外網什麼都能做（A 現在的行為）。
-- **建議 B**，另給一個設定可切到 A 或 C。後果：設定區能改後端網址、tunnel token、發 worker 註冊權杖，一旦管理員密碼外洩，C 的損害最大。
+**D4.【已定案】管理與設定頁從外網只能看，不能改。**
+- 所有「寫入」與「操作」（改設定、帳號、額度、等級、後端、tunnel、發 worker 註冊權杖、輪替金鑰、測試連線、重啟角色、撤銷別人的 key、登出別人…）**只能在本機（`127.0.0.1` / `localhost`）做**。
+- 從外網連進來時，管理與設定頁**嚴格唯讀**：不是「按鈕變灰」，而是那些會改變狀態的端點在外網那一面**根本不存在**。
+- 設計見 **2.7**；逐項防護見 **第 6 節資安檢查表**。衍生的新決策：D15、D16。
 
-**D5. 額度超過時要多嚴格？**
-- A：全部軟性（A 的作法：事後記帳，單筆可能略超）。
-- B：全部硬性預扣（B 的作法：先保留 `max_tokens` 的額度再放行）。
-- C：直連維持軟性、加密面維持預扣，但記在同一本帳。
-- **建議 C**。後果：不動 A 的行為與 221 個測試，也不回退 B 修過的兩個繞過漏洞；代價是兩個面的行為略有不同，文件要寫清楚。選 B 要改 A 的 `quota.py` 與串流結算，風險較高。
+**D5.【已定案】用量一律「事後記帳」（軟性）；搶 GPU 的問題用「優先佇列」解決；另設不受額度限制的 VIP。**
+- 兩個服務面（直連、加密）都不再預扣；B 的 `reserved_tokens` 預扣機制移除。
+- 請求不再互搶：進佇列排隊，依等級與公平規則出隊。
+- 等級 `vip / normal / low`；VIP 不受額度限制且優先出隊。
+- 設計見 **2.8**。衍生的新決策：D17、D18、D19。
+- 後果（請知悉）：軟性記帳下，一個帳號最多可能超出額度「同時請求數 × 單次 `max_tokens`」；B 原本用預扣堵住的兩個繞過情境改由「同時請求上限 + 佇列」限制超出幅度，`tests/e2e/test_e2e_quota_defects.py` 要改寫成「超出幅度有上界」。
 
 **D6. 請求的前向保密（B 的 SECURITY 檢討 1 明寫「需擁有者決定」）要現在做嗎？**
 （白話：現在若有人先錄下密文、日後又偷到 worker 私鑰，就能解開舊請求。修法是 worker 定期發「短期金鑰」。）
@@ -385,21 +449,54 @@ git commit -m "merge: bring in E2E gateway/worker/client (B) alongside the direc
 **D11. HTTP 函式庫怎麼收斂？**
 - A：閘道用 FastAPI（A）；worker 與 client 這一版先留在 aiohttp（B），都放在 `secure` extra。
 - B：全部改成 FastAPI / httpx / websockets（相依最少，但要重寫 B 約 3,800 行測試的測試工具）。
-- **建議 A**，B 列為之後的清理項目。後果：加密功能會多裝 aiohttp 一家（免安裝版 zip 約多 10 MB）。
+- **建議改為 B（待決；第 1 版建議 A）**。理由：擁有者偏好 FastAPI；G2、G3 這一版本來就要大改（串流、設定改 YAML），順便換底層比分兩次便宜。B 選 aiohttp 的原因是 worker 需要 WebSocket 用戶端（FastAPI 沒有），aiohttp 一個套件含伺服器與用戶端；改用 FastAPI + uvicorn + httpx + `websockets` 完全可行。成本：`worker/link.py`（233 行）、`client/sdk.py` + `proxy.py`（約 630 行）改寫，約 2,900 行用到 aiohttp 的測試與測試工具重寫（情境不可少），G2 / G3 / H1 工作量約多三到四成。走法：先閘道（D2）→ worker 後端改用 A 的（D12）→ 最後才換 worker 連線與用戶端。選 B 後 `secure` extra 為 `cryptography`、`websockets`。
 
 **D12. worker 用哪一套後端轉接？**
 - A：改用 A 的 `llmop.backends`（Ollama / vLLM / LM Studio / llama.cpp / OpenAI 相容，已支援串流），外加 B 的「只准 loopback」規則。
 - B：留 B 自己的（Ollama 走原生 `/api/chat` 轉譯），另外幫它補串流。
-- **建議 A**。後果：只維護一套；B 的 Ollama 原生轉譯（228 行，處理圖片與工具呼叫的格式）先不用，需要時可做成一種額外的後端類型。Ollama 的 `/v1` 有已知限制（不吃每筆請求的 `num_ctx`），A 的文件已說明。
+- C：A 的 adapter + 預設只准 loopback + 可在本機控制台明確開啟「允許區網後端」（只准私有網段、紅色警告）。
+- **建議 A（待決）**；有人需要「LLM 在區網另一台」時再加 C。只准 loopback 的理由：worker 手上是已解密的明文，用未加密的 http 送到別台會讓端對端加密在最後一段失效，而且使用者無從得知。後果：只維護一套；B 的 Ollama 原生轉譯（228 行，處理圖片與工具呼叫的格式）先不用，需要時可做成一種額外的後端類型。Ollama 的 `/v1` 有已知限制（不吃每筆請求的 `num_ctx`），A 的文件已說明。
 
-**D13. SYNOX 怎麼接？**（查證：SYNOX 的 `local` 後端**不送** `Authorization` 標頭，`SYNOX/src/synox/llm/local.py:306`，所以連不上需要 API key 的直連閘道）
-- A：一律經過 `llmop client proxy`；代理新增「直連上游」模式（不加密，只替你帶 API key）。SYNOX 永遠填 `http://127.0.0.1:8788`，換方案不用改 SYNOX。
-- B：直連時 SYNOX 改用它的 `openai_compat` 後端直接帶 key；加密時才用代理。
-- **建議 A**（B 仍然可行，文件一併寫）。後果：用戶端機器一定要裝 llmop（免安裝版即可）。
+**D13. SYNOX 怎麼接？能不能不要另外的代理？**
+查證結果：SYNOX 的 `local` 後端**不送** `Authorization`（`SYNOX/src/synox/llm/local.py:306-311`），一律串流；`openai_compat` 後端會把 `api_key` 與 `base_url` 交給 `ntu_easy_llm`（`llm/factory.py:70`、`llm/easy_llm.py:129`），呼叫的是一次回整段的函式（該套件本機未安裝，標頭與是否串流未親自確認）。
+- ①：SYNOX 用 `openai_compat` 直連閘道 `/v1`。llmop 不用改；多半不串流（超過約 100 秒會被 Cloudflare 切）；明文。
+- ②：閘道接受 key 放在網址路徑（`/k/<key>/v1`），SYNOX 用 `local/other`。可串流；key 會進各種紀錄；明文。
+- ③：本機免 key 入口——SYNOX 與閘道同一台時填 `http://127.0.0.1:8781/v1`，對應到指定帳號（例如 VIP）。可串流、享有佇列與 VIP；本機任何程式都能用。
+- ④：經 `llmop client` 代理。**唯一能端對端加密的作法**；要在 SYNOX 那台多跑一個程式。
+- **做不到的事**：端對端加密必須在 SYNOX 那台機器上加密，所以不是代理就是把加密碼放進 SYNOX；沒有任何閘道端的設計能讓普通 OpenAI 用戶端變成端對端加密。
+- **建議改為「依情況」（待決；第 1 版建議一律走代理）**：同機 → ③；異機不加密 → ①；要加密 → ④；② 不建議。代理因此只在加密時才需要。長期解：在 SYNOX 的 `local` 後端加可選的 API key（改 SYNOX，不在本專案範圍）。
 
 ### 己、流程
 
-**D14. 合併方法**：**建議 3.1 的 A（直接 merge 無關歷史到新的本地分支 `dev`）**。其他選項見 3.1。
+**D14.【已定案】合併方法**：**採 3.1 的 A（直接 merge 無關歷史到新的本地分支 `dev`）**。其他選項見 3.1。
+
+### 庚、D4 / D5 定案後新增的決策
+
+**D15. 怎麼判斷「這個請求是不是本機來的」？**（cloudflared 也是從 `127.0.0.1` 連進來，所以不能只看來源 IP）
+- A：**開兩個 port**。公開 port（8780，tunnel 只指向它）完全不註冊寫入端點；本機控制台 port（8781）才有寫入功能，tunnel 永遠不會指向它。另外再加標頭與 Host 檢查當第二道。
+- B：只開一個 port，靠「有沒有轉送標頭 + Host 是不是本機」判斷（LINEBot 的作法）。
+- **建議 A（待決）**。後果：A 是結構上隔離，就算判斷邏輯有漏洞，外網也碰不到寫入端點；代價是本機要記兩個網址（啟動器會自動開對的那個）。B 遇到不加標頭的轉送工具（`ssh -R`、ngrok、自架 nginx）會被當成本機。
+
+**D16. 一般使用者（不是管理員）從外網可以做什麼？**
+- A：外網全部唯讀。連「申請 / 撤銷自己的 API key」都不行，key 全由管理員在本機發（D7 因此自動變成 B）。
+- B：一般使用者在外網可以登入、用 playground、申請與撤銷**自己的** key；管理與設定仍然唯讀。VIP 帳號的 key 只能在本機發。
+- **建議 B（待決）**。後果：A 最嚴，但朋友每次要 key 都得找你；B 之下，朋友的密碼被盜時，損害上限是他自己的額度。
+
+**D17. 一般帳號的額度用完時怎麼辦？**
+- A：直接拒絕（429，告知何時重置）。
+- B：不拒絕，自動降到 `low` 佇列——沒人排隊時照樣能用，有人排隊就讓別人先。
+- C：每個帳號可設定 `over_quota: reject | low`。
+- **建議 C，預設 `low`（待決）**。後果：選 B / C-low 時，額度的意義從「用量上限」變成「優先權的額度」，GPU 閒著不浪費。
+
+**D18. `low` 會不會永遠排不到？**
+- A：嚴格優先——只要有 `normal` 在等，`low` 就不動。
+- B：等超過一段時間（預設 120 秒）自動升一級，最高只升到 `normal`，永遠不會超過 VIP。
+- **建議 B（待決）**。
+
+**D19. VIP 還要不要有「同時請求數」上限？**
+- A：VIP 完全沒有任何限制。
+- B：VIP 不受 token 與請求次數限制，但保留同時請求上限（預設 2，可設 0 取消），免得一個 VIP 佔滿 GPU、其他 VIP 也排不到。
+- **建議 B（待決）**。
 
 ### 低風險的不一致（附預設值；沒意見就照預設）
 
@@ -442,22 +539,22 @@ git commit -m "merge: bring in E2E gateway/worker/client (B) alongside the direc
 
 **⏸ 等待點 W0**：dispatcher 確認 784 全過，且 D1–D13 已有答覆，才進階段 1。
 
-### 階段 1 — 地基（4 個任務可平行）
+### 階段 1 — 地基（F1–F4，加上 5.0 的 S1、F5，共 6 個任務可平行）
 
 | ID | 目標 | 擁有的檔案 | 相依 | 卡在 | 驗收 |
 |---|---|---|---|---|---|
 | **F1** | 設定模型：`profile`、`gateway.planes`、`secure`、`worker`、`client` 區段與驗證；各方案的預設值；把 cli.py 裡「保留註解改 YAML」的函式搬到 `configedit.py`（cli.py 只改 import）；`settings.py` 的寫入服務（驗證 → 原子寫入 → `.bak` → 回報生效方式） | `src/llmop/config.py`、`configedit.py`、`settings.py`、`examples/config.example.yaml`、`config.example.yaml`、`tests/test_profile.py`、`tests/test_settings_service.py` | M0 | D1 D8 D9 | 沒有 `profile` 的舊 `config.yaml` 仍然載入並等同 `direct`；每個方案有載入測試；寫入失敗不留半個檔；A 的測試全過 |
-| **F2** | 資料庫統一：`api_keys` 加 `sig_public_key`；新增 `workers / worker_keys / worker_models`（搬 B 的 `gateway/store.py` 對應方法）；舊資料庫自動升級；`quota.py` 新增預扣 / 結算 / 釋放介面（依 D5） | `src/llmop/store.py`、`quota.py`、`security.py`、`tests/test_store_secure.py`、`tests/test_quota_reserve.py` | M0 | D5 D7 | 用 A v0.1 的資料庫檔開啟後自動升級且資料不變；B 的「兩個額度繞過」情境（`tests/e2e/test_e2e_quota_defects.py` 的邏輯）在新介面上有對應測試 |
+| **F2** | 資料庫統一：`api_keys` 加 `sig_public_key`；新增 `workers / worker_keys / worker_models`（搬 B 的 `gateway/store.py` 對應方法）；舊資料庫自動升級；`quota.py`：VIP 免額度、`over_quota` 降級（D17）、事後記帳（D5 已定：**不做預扣**）；`usage_events` 加 `tier`、`queue_ms`；`sessions` 加 `origin` | `src/llmop/store.py`、`quota.py`、`security.py`、`tests/test_store_secure.py`、`tests/test_quota_tier.py` | M0 | D5 D7 | 用 A v0.1 的資料庫檔開啟後自動升級且資料不變；VIP 不被額度擋、用量照記；額度用完依 D17 拒絕或降級；並發下超出幅度有上界的測試 |
 | **F3** | 協定 v2 與串流密碼：標頭 `stream` 欄位；`chunk` / `cancel` 訊框、`hello.features`；`crypto.py` 的分段封裝與開啟（`seq`、`final` 綁進 `info`）；路徑常數（依 D1）；更新 `PROTOCOL.md`、`SECURITY.md`（新增「串流的洩漏面」一節） | `src/llmop/protocol.py`、`crypto.py`、`docs/secure/PROTOCOL.md`、`docs/secure/SECURITY.md`、`tests/test_protocol.py`、`tests/test_crypto.py` | M0 | D1 D3 | 測試涵蓋：分段亂序、重複、缺 `final`、跨請求調換、`info` 不符，全部開啟失敗；與 `pyhpke` 的交叉驗證仍通過。D3 選 B 時，本任務只做路徑與版本，不做串流 |
 | **F4** | 路徑與 Windows：`paths.py` 的 `os.fchmod` 在 Windows 上的替代作法（沒有就略過並改用建立時的權限）；`home()` 依 D9 決定預設位置；B 的 `config.json` 匯入工具 | `src/llmop/paths.py`、`src/llmop/migrate.py`、`tests/test_paths.py`、`tests/test_migrate.py` | M0 | D8 D9 | 用 monkeypatch 拿掉 `os.fchmod` 後 `write_json(secret=True)` 仍成功；`LLMOP_HOME` 仍然優先 |
 
 **⏸ 等待點 W1**：四個任務都合進 `dev`、全套測試通過。dispatcher 把 F1–F3 產出的介面（設定 dataclass、`Store` 新方法、`protocol` 新訊框）貼進階段 2 每個任務的說明。
 
-### 階段 2 — 功能（5 個任務可平行）
+### 階段 2 — 功能（G1–G5，加上 5.0 的 G6，共 6 個任務可平行）
 
 | ID | 目標 | 擁有的檔案 | 相依 | 卡在 | 驗收 |
 |---|---|---|---|---|---|
-| **G1** | 加密中繼移植到 FastAPI：`/e2e/v1/chat/completions`（同步 80 秒 → 202 → 輪詢；串流時回 SSE 並支援 `?after=seq` 游標輪詢）、`/e2e/v1/requests/{id}`、`/e2e/v1/models`、`/worker/ws`（握手、`chunk` 轉送、`cancel`）；接帳號、key、額度；依 `gateway.planes` 掛載或不掛載兩個面 | `src/llmop/secure/**`、`src/llmop/app.py`、`src/llmop/auth.py`、`src/llmop/api/__init__.py`、`tests/secure/**`（由 `tests/gateway/test_api.py`、`test_worker_ws.py`、`test_logging.py` 移植） | F1 F2 F3 | D1 D2 D5 | B 閘道測試的每個情境都有對應測試並通過；只開 `secure` 時 `/v1/chat/completions` 回明確錯誤；只開 `direct` 時 `/e2e/*` 與 `/worker/ws` 是 404；A 的 `tests/test_api.py` 原樣通過 |
+| **G1** | 加密中繼移植到 FastAPI：`/e2e/v1/chat/completions`（同步 80 秒 → 202 → 輪詢；串流時回 SSE 並支援 `?after=seq` 游標輪詢）、`/e2e/v1/requests/{id}`、`/e2e/v1/models`、`/worker/ws`（握手、`chunk` 轉送、`cancel`）；接帳號、key、額度；依 `gateway.planes` 掛載或不掛載兩個面 | `src/llmop/secure/**`、`src/llmop/app.py`、`src/llmop/auth.py`、`tests/secure/**`（由 `tests/gateway/test_api.py`、`test_worker_ws.py`、`test_logging.py` 移植） | F1 F2 F3 | D1 D2 D5 | B 閘道測試的每個情境都有對應測試並通過；只開 `secure` 時 `/v1/chat/completions` 回明確錯誤；只開 `direct` 時 `/e2e/*` 與 `/worker/ws` 是 404；A 的 `tests/test_api.py` 原樣通過 |
 | **G2** | worker：後端改用 `llmop.backends`（依 D12）並保留 loopback 規則；串流分批封裝（150 ms、256 位元組填充、可設定）；處理 `cancel`；設定從 `config.yaml` 的 `worker` 區段讀；`features` 公告 | `src/llmop/worker/**`、`tests/worker/**` | F1 F3 F4 | D3 D11 D12 | 既有 worker 測試（重放、金鑰、連線重試、握手）通過；新增串流測試：增量順序正確、`final` 帶 usage、後端中途失敗時送出**封裝過的**錯誤、收到 `cancel` 後後端連線被關閉 |
 | **G3** | 用戶端：SDK `chat_stream()`；代理輸出真的 OpenAI SSE；SSE 不通時自動退到游標輪詢；「直連上游」模式（依 D13）；設定從 `config.yaml` 的 `client` 區段讀；key 前綴兩種都接受 | `src/llmop/client/**`、`tests/client/**` | F1 F3 F4 | D3 D13 | 既有用戶端測試通過；新增：串流逐段輸出、亂序或缺 `final` 時報錯而不是靜默截斷、退回輪詢、直連上游會帶 `Authorization` |
 | **G4** | 網頁：`/ui/settings` 九個分頁（2.6）與對應的 `/ui/api/settings/*`；把 B 管理介面的 worker 管理與簽章公鑰綁定搬進來；申請 key 時可貼簽章公鑰；外網存取規則（D4）；加密方案下停用閘道 playground | `src/llmop/web/**`、`tests/test_web.py`（只能新增）、`tests/test_settings_web.py` | F1 F2 | D4 D7 D10 | 非 admin 與未登入一律被拒；所有寫入要 CSRF；秘密欄位不出現在任何回應（有測試逐一檢查）；外網請求依 D4 被擋；A 的 45 個 web 測試原樣通過；頁面不依賴 CDN、沒有 CSP 錯誤 |
@@ -475,7 +572,7 @@ G4 需要「重啟某個角色」的動作時，呼叫 `AppState` 上的一個�
 | **H2** | 打包與營運：`pyproject.toml` 定稿；免安裝版納入 `secure` 的 Windows wheel；新增 `.bat`（worker、用戶端代理、方案選擇）；Docker compose 的加密方案範例；CI 矩陣（ubuntu + windows，3.11 / 3.12 / 3.13，含 `secure`）；release workflow | `pyproject.toml`、`scripts/**`、`docker/**`、`.github/**`、`.gitignore`、`.dockerignore` | G5 | D11 | `python -m build` 產出 wheel；乾淨 venv 裝 wheel（不含 extra）可跑直連方案；裝 `[secure]` 可跑加密方案；`scripts/build_portable.py` 產出 zip 且內含 `cryptography`、`aiohttp` |
 | **H3** | 文件：合併的 `README.md`（先講怎麼選方案）；更新 `HANDOFF.md`、`DEPLOYMENT_GUIDE.html`；`docs/secure/` 三份對齊新路徑與串流；SYNOX 接法（D13）；`tests/e2e/test_docs.py` 對齊 | `README.md`、`docs/**`（`docs/plan/` 除外）、`tests/e2e/test_docs.py` | G1–G5 | 全部 | 「安全邊界」段落在 README 與 `SECURITY.md` 一字不差（沿用 B 的測試）；文件中的每個指令都存在（沿用 B 的 `--help` 檢查） |
 
-**⏸ 等待點 W3**。
+**⏸ 等待點 W3**。之後先跑 5.0 的 **S9**（獨立安全複查），再進階段 4。
 
 ### 階段 4 — 整合（一個執行者）
 
@@ -485,6 +582,28 @@ G4 需要「重啟某個角色」的動作時，呼叫 `AppState` 上的一個�
 
 **⏸ 最終等待點**：交給擁有者在 Windows 主機上實測（真的 Ollama、真的 cloudflared、SYNOX）。
 
+### 5.0 D4 / D5 定案後新增與調整的任務
+
+| ID | 階段 | 目標 | 擁有的檔案 | 相依 | 卡在 | 驗收 |
+|---|---|---|---|---|---|---|
+| **S1** | 1 | 網路守門：`netguard.py`（`is_local()`、轉送標頭清單、`Host` 白名單、公開面 `Host` 檢查、log 用的字串清理函式）。純函式 + ASGI middleware，不接線 | `src/llmop/netguard.py`、`tests/test_netguard.py` | M0 | D15 | 測試矩陣：loopback 無標頭 → 本機；loopback + 任一轉送標頭 → 外網；`Host: evil.example` → 拒絕；`Host: localhost:8781` + `Origin: https://evil` → 拒絕；IPv6、大小寫、多值標頭、`Host` 帶尾點 |
+| **F5** | 1 | 排程器：`scheduler.py`（等級、按使用者輪流、升級防餓死、`max_length` / `max_per_user` / `max_wait`、取消、`Retry-After` 估算、狀態快照）。與 HTTP 無關的純 asyncio 元件 | `src/llmop/scheduler.py`、`tests/test_scheduler.py` | M0 | D17 D18 D19 | 用假時鐘測：VIP 插隊但不中斷執行中的；兩個使用者 10 比 1 時輪流出隊；滿了回對應錯誤；等待者取消後名額不外洩；1000 次隨機進出後內部計數歸零 |
+| **G6** | 2 | 直連面接線：`backends/base.py` 的 Semaphore 換成排程器；`api/proxy.py` 排隊期間的 SSE 保活、非串流 60 秒上限、斷線即離隊；**`/v1` 請求本文大小上限**（現在沒有，`api/routes.py:58`）；過深 JSON 回 400；`image_url` 只收 `data:`（可設定） | `src/llmop/backends/**`、`src/llmop/api/proxy.py`、`api/routes.py`、`api/sse.py`、`api/errors.py`、`tests/test_api_queue.py`、`tests/test_api.py` 與 `tests/test_backends.py`（只能新增） | F1 F2 F5 | D17–D19 | A 的 API 與後端測試原樣通過；超大本文回 413 且不讀進記憶體；排隊情境的串流收到保活行 |
+
+既有任務的調整：
+
+| 任務 | 增加的內容 |
+|---|---|
+| **F1** | 設定加 `accounts.*.tier`、`accounts.*.over_quota`、`queue:`、`server.local_port`（8781）、`server.remote_admin` |
+| **G1** | hub 用 F5 的排程器（每台 worker 一個）；`pending` 回應帶 `queue_position`；`create_app(surface=…)` 產生公開面與本機面兩個 app（公開面不註冊寫入路由）；`/worker/ws` 握手失敗限流；`app.py` 不再擁有 `api/__init__.py`（改歸 G6） |
+| **G2** | worker 端可設定「`image_url` 只收 `data:`」（加密面閘道看不到內容，只能在 worker 擋） |
+| **G3** | **用戶端代理加固**（現在沒有任何檢查，見 6.2 第 1 項）：`Host` 白名單、`Content-Type` 必須是 `application/json`、有 `Origin` 或 `Sec-Fetch-Site: cross-site` 就拒絕、可選的本機權杖 |
+| **G4** | 寫入路由只掛在本機面；唯讀遮蔽；`sessions.origin`；等級下拉選單與佇列面板；所有來自外部的字串（模型名、worker 名、使用者名）一律 `textContent`；公開面路由白名單測試 |
+| **G5** | node 起兩個 uvicorn（公開面開 `proxy_headers`、本機面關）；tunnel 拒絕指向本機控制台與後端 port；直連與本機 worker 共用排程器 |
+| **H1** | e2e 加：經「假 cloudflared」（從 loopback 連入並加 `Cf-Connecting-Ip`）對每個寫入端點發請求，全部被拒；佇列與 VIP 的端到端情境；`test_e2e_quota_defects.py` 改寫為「超出幅度有上界」 |
+| **H2** | 免安裝版建置：Python 壓縮檔**比對寫死的 sha256**（現在只印出來，`scripts/build_portable.py:117`）；相依套件用含雜湊的鎖定檔安裝 |
+| **新增 S9** | 階段 4、I1 之前：獨立的安全複查（另一個執行者，只讀程式不寫功能），照第 6 節逐項驗證並補測試；發現的問題交 I1 修。擁有：`tests/security/**`、`docs/security/web-threats.md`（把第 6 節轉成正本並更新狀態） |
+
 ### 5.1 決策 → 任務對照
 
 | 決策 | 卡住的任務 | 若選非建議選項，計劃怎麼變 |
@@ -492,15 +611,18 @@ G4 需要「重啟某個角色」的動作時，呼叫 `AppState` 上的一個�
 | D1 | F1 F3 G1 | 選 A：路徑不改，G1 改成啟動時二選一，H1 少一種矩陣 |
 | D2 | G1 G4 H1 | 選 B：G1 縮成「由 node 啟動 B 的 aiohttp 閘道」；F2 不搬 worker 表；G4 的分頁 5、6 改成連到 B 的 `/admin/`；帳號與額度**不統一** |
 | D3 | F3 G1 G2 G3 H1 | 選 B：四個任務的串流部分全部拿掉，約省四分之一工作量 |
-| D4 | G4 | 只影響一個存取檢查與預設值 |
-| D5 | F2 G1 | 選 B：F2 要改 A 的結算流程，A 的額度測試需擁有者同意後調整 |
+| D4 | **已定案** → S1 G1 G4 G5 | — |
+| D5 | **已定案** → F2 F5 G1 G4 G6 | — |
+| D15 | S1 G1 G5 | 選 B：不開第二個 port，全靠 `is_local()`；測試要多涵蓋各種轉送工具 |
+| D16 | G4 | 選 A：公開面連使用者的 key 端點都不註冊；D7 自動為 B |
+| D17 D18 D19 | F2 F5 | 只影響排程器與額度檢查的分支與預設值 |
 | D6 | — | 選 B：W3 之後另開一個階段（協定 v3） |
 | D7 | F2 G4 | 選 B：G4 拿掉使用者自助綁定公鑰 |
 | D8 D9 | F1 F4 G5 | 選 B：F4 不做匯入；G4 的分頁 7、8 要分別讀寫 JSON |
 | D10 | G4 G5 | 選 A：G4 拿掉分頁 7、8；G5 的 node 不必在 worker 機器帶網頁 |
-| D11 | G2 G3 H2 | 選 B：G2、G3 各多一輪改寫，H1 的測試工具重寫 |
+| D11 | G2 G3 H1 H2 | 建議已改為 B：G2、G3 各多一輪改寫（link → `websockets`，client → httpx / FastAPI），H1 的測試工具重寫；選 A 則維持 aiohttp |
 | D12 | G2 | 選 B：G2 要在 B 的兩個後端各自實作串流 |
-| D13 | G3 H3 | 選 B：G3 不做直連上游 |
+| D13 | G3 G5 G6 H3 | ③ 由 G5 / G6 在本機面提供免 key 的 `/v1`（對應指定帳號）；① 只需文件（H3）；④ 是 G3 既有範圍；選 ② 則 G6 多一條路由並要把 key 從存取紀錄遮掉。G3 的「直連上游」模式改為可不做 |
 
 ### 5.2 測試策略
 
@@ -516,7 +638,55 @@ G4 需要「重啟某個角色」的動作時，呼叫 `AppState` 上的一個�
 
 ---
 
-## 6. 無法驗證或尚未驗證的事
+## 6. 資安檢查表（對照「SYNOX 網頁防護盤點」的 27 類攻擊）
+
+狀態：**已有** = 現有程式已做（括號內是哪一邊）；**計劃** = 本計劃的任務會做；**缺口** = 現在有洞、已排任務補；**接受** = 擋不了或決定不擋，寫進文件。所有項目在 S9 逐一複查。
+
+### 6.1 逐項對照
+
+| # | 攻擊 | llmop 的情況與控制 | 任務 | 狀態 |
+|---|---|---|---|---|
+| 1 | 注入 | SQL 一律參數化（A `store.py`、B `gateway/store.py`）；YAML 用 `safe_load`；cloudflared 以參數陣列啟動、不經 shell。**新風險**：設定區可改 `tunnel.cloudflared` 的執行檔路徑，等於能指定要執行的程式 → 只能本機改，且啟動前檢查檔案存在、不接受參數字串 | G4 G5 S9 | 已有 + 計劃 |
+| 2 | 路徑穿越 | 靜態檔名走白名單正規式（A `web/routes.py:75`）。新增的備份下載 / 還原只用固定檔名，不收使用者給的路徑 | G4 | 已有 + 計劃 |
+| 3 | CSRF | A：每個 session 一個 CSRF 碼 + `Origin` + `Sec-Fetch-Site` 檢查（`web/routes.py:148-199`）；新的設定端點全部沿用。**用戶端本機代理沒有任何防護**（6.2-1） | G4 G3 | 已有 + **缺口** |
+| 4 | XSS | A：嚴格 CSP、不載入外部資源（`web/routes.py:51`）。**新風險**：設定區會顯示 worker 自己報上來的名稱與模型名、後端回的模型名 → 一律當文字顯示，並有測試塞 `<script>` 名稱 | G4 | 已有 + 計劃 |
+| 5 | 繞過登入 | 公開面路由白名單（2.7-2）；有測試列舉全部路由，確認除了登入與靜態檔以外都要 session 或 API key | S1 G1 G4 H1 | 計劃 |
+| 6 | 偷登入 | cookie 只存雜湊（A `sessions.id_hash`）、HttpOnly、API key 只存 sha256。新增：session 標記 `local / remote`，外網偷到的 cookie 永遠不能寫 | F2 G4 | 已有 + 計劃 |
+| 6b | 本機其他程式偷登入 | 瀏覽器的 cookie 不分 port，`127.0.0.1` 上別的程式能騙到本機控制台的 cookie。與 SYNOX 相同的未解問題。緩解：本機 session 時效短、設定區不顯示任何秘密 | — | **缺口**（接受，文件說明） |
+| 7 | 暴力猜 | A：依 IP 與帳號限流（`web/throttle.py`）；key 與權杖都是 192–256 位元隨機。**`/worker/ws` 握手失敗沒有限流** → 補上 | G1 | 已有 + **缺口** |
+| 8 | 重放 | 加密面：時間窗 + 開機門檻 + 已見 ID（B `worker/replay.py`）、閘道去重；串流分段把序號綁進金鑰（F3）。直連面靠 TLS，不另做 | F3 | 已有 + 計劃 |
+| 9 | 請求走私 | 依賴 uvicorn（h11）與 aiohttp 的嚴格解析，前面還有 cloudflared。S9 加測試：互相矛盾的長度標頭一律 400 | S9 | 計劃 |
+| 10 | 塞爆 | **A 的 `/v1` 本文沒有大小上限**（`api/routes.py:58` 直接 `request.body()`）→ 補；佇列上限（2.8）；uvicorn 連線數上限；加密分段暫存有上限與 TTL；WebSocket 訊息 16 MiB（B 已有）；登入先限流再算 scrypt | G6 F5 G1 G5 | **缺口** + 計劃 |
+| 11 | DNS rebinding | **兩邊現在都不檢查 `Host`**（A 的閘道、B 的閘道、B 的用戶端代理）→ 本機面、公開面、用戶端代理全部加白名單 | S1 G3 G5 | **缺口** |
+| 12 | SSRF | 後端網址只能本機改（D4）；`follow_redirects=False`、`trust_env=False`（A `backends/router.py:61`）；worker 後端只准 loopback（B）；「測試連線」是操作，外網碰不到。**新發現**：使用者可在訊息裡放 `image_url: http://內網…`，vLLM 之類的後端會自己去抓 → 預設只收 `data:` | G6 G2 | 已有 + **缺口** |
+| 13 | 開放轉址 | 登入後只轉到固定的內部路徑；不接受 `next=` 之類的參數。S9 確認每一個 `RedirectResponse` | S9 | 已有（待複查） |
+| 14 | 點擊劫持 | `X-Frame-Options: DENY` + `frame-ancestors 'none'`（A）；新頁面走同一個 `_UIRoute` | G4 | 已有 |
+| 15 | 不安全的還原 | 只讀 JSON 與 `yaml.safe_load`；B 的協定解析拒絕重複鍵與 `NaN`。直連面補：巢狀過深回 400 而不是 500 | G6 | 已有 + 計劃 |
+| 16 | 檔案上傳 | 目前沒有上傳。新增的「還原設定」：只限本機、有大小上限、只解析並驗證、絕不執行 | G4 | 計劃 |
+| 17 | 供應鏈 | 相依套件沒有鎖版本與雜湊；**免安裝版下載的 Python 只印出 sha256、沒有比對**（`scripts/build_portable.py:117`）；cloudflared 靠 winget。→ 鎖定檔 + 比對雜湊；CI 加 `pip-audit` | H2 | **缺口** |
+| 18 | 提示注入 | llmop 只轉送，不執行任何工具（B SECURITY 檢討 13：worker 原樣交還 `tool_calls`）。playground 把模型輸出當文字顯示。llmop 自己沒有會被騙的 AI | G4 | 不適用 / 已有 |
+| 19 | AI 或排程冒充人 | 分層已做：API key 只能打 `/v1`，永遠進不了網頁與管理端點（A 的設計原則）。寫入另外要求「本機 + session + CSRF」。SYNOX 拿到的只會是 API key | G4 | 已有 + 計劃 |
+| 20 | 帳號被盜 | 管理員密碼在外網被盜 → 只能看、不能改（D4）。一般帳號被盜 → 損害以該帳號額度為上限。**VIP 沒有額度上限** → VIP 的 key 只能本機發（D16）、保留同時上限（D19）、佇列面板看得到異常 | G4 F5 | 計劃 |
+| 21 | 臨時網址被濫用 | quick tunnel 網址任何人都敲得到：公開面全部要登入或 key；寫入端點不存在；tunnel 只准指向公開 port（2.7-6）；網址每次重啟都換 | G5 | 計劃 |
+| 22 | 中間的人看得到內容 | 直連方案：Cloudflare 看得到對話明文、密碼、cookie、key → **接受**，並在方案選擇頁寫明；要避免就選加密方案（對話內容看不到；key 被看到也因為要簽章而無法單獨使用）。登入密碼經過 Cloudflare 這點在兩種方案都一樣 → 靠 D4 把損害限制在唯讀 | H3 | **接受** |
+| 23 | 錯誤訊息洩漏 | 文件頁與 `Server` 標頭已關（A）。**後端的錯誤文字會原樣傳給使用者**（可能含內部網址、路徑）→ 公開面只回固定句子 + 錯誤碼，細節只進本機 log；`/health` 不回版本號給外網 | G6 S9 | 已有 + **缺口** |
+| 24 | 紀錄被塞假資料 | A 的登入紀錄用 `%r`（會跳脫換行）；B 的紀錄只有固定欄位並有靜態測試。新增：所有進 log 的外來字串過 `netguard` 的清理函式 | S1 S9 | 已有 + 計劃 |
+| 25 | 試算表公式注入 | 目前沒有 CSV 匯出。規則先寫下：日後做用量匯出時，`= + - @` 開頭的格子一律加前綴 | — | 不適用（規則已記） |
+| 26 | 同一台電腦的別人 | 本機控制台仍要登入（不做自動登入）。**Windows 上金鑰檔的 0600 沒有效果**（F4 先讓它能跑，ACL 另議）；用戶端代理對本機任何程式開放 → 可選的本機權杖 | F4 G3 | **缺口**（部分接受） |
+| 27 | 惡意的工具程式 | llmop 沒有外掛。相近的情況：惡意 worker（註冊權杖只能本機發 + 用戶端釘選公鑰）、惡意後端（只連管理員在本機設定的網址） | G1 | 不適用 / 已有 |
+
+### 6.2 合併前最值得先修的洞（依嚴重度）
+
+1. **B 的用戶端代理（`127.0.0.1:8788`）完全沒有防護**：不驗證、不查 `Host`、不查 `Origin`、不查 `Content-Type`（`client/proxy.py:84`、`:259` 只檢查綁定位址）。使用者只要開著代理又瀏覽到惡意網頁，那個網頁就能用 DNS rebinding 以使用者的 API key 與簽章金鑰送請求並讀到回覆。→ G3。
+2. **A 的 `/v1` 沒有請求大小上限**，任何持有有效 key 的人（驗證在讀本文之前，`api/routes.py:113`）可以送超大本文吃光記憶體。→ G6。
+3. **沒有任何地方檢查 `Host`**（檢查表 11）。→ S1。
+4. **B 的「是否本機」只看 `Cf-Connecting-Ip` 一個標頭**（`gateway/admin.py:91`），B 自己的文件也承認 ngrok / `ssh -R` 會繞過。→ S1 的完整標頭清單 + D15 的兩個 port。
+5. **A 開了 uvicorn 的 `proxy_headers`**（`cli.py:813`）：對端位址會被轉送標頭改寫，任何「看對端 IP 判斷本機」的新程式都會出錯。→ 本機面關閉 `proxy_headers`，`is_local()` 只在 `netguard` 一處實作。
+6. **`image_url` 讓後端替使用者抓內網網址**（檢查表 12）。→ G6、G2。
+7. **免安裝版的供應鏈沒有比對雜湊**（檢查表 17）。→ H2。
+8. **後端錯誤文字原樣外流**（檢查表 23）。→ G6。
+
+## 7. 無法驗證或尚未驗證的事
 
 - **B 在 Windows 上的行為**：沒有 Windows 環境。`os.fchmod` 在 Windows 要 Python 3.13 才有，是依 Python 文件判斷，沒有實跑；0600 權限在 Windows 上實際沒有保護效果，私鑰檔的保護要另外想（F4 先讓它能跑，是否加 ACL 留待之後）。
 - **真的 Ollama、真的 cloudflared、官方 `openai` SDK、SYNOX 實際連線**：兩邊都只用假後端測過（A 的 HANDOFF §4 也這樣寫）。
@@ -524,5 +694,6 @@ G4 需要「重啟某個角色」的動作時，呼叫 `AppState` 上的一個�
 - **`cryptography` 47–49 版的 HPKE**：B 的 SECURITY.md 說只在 50.0.1 確認過；我跑測試用的是 50.0.2。
 - **SYNOX 的 `openai_compat` 後端是否支援自訂 `base_url` + API key**：只確認了 `local` 後端不送 `Authorization`，沒有細讀 `openai_compat`（影響 D13 的 B 選項）。
 - **uvicorn 的 WebSocket 與 aiohttp 在同一個 process 共存**：理論上沒問題（同一個 asyncio loop），尚未實作驗證（G5）。
+- **第 6 節的現況判斷多數來自讀程式**，沒有實際發動攻擊驗證（例如用 DNS rebinding 打用戶端代理、用 `image_url` 讓 vLLM 抓內網）；S9 要實測。
 - **GitHub**：push 仍被擋（403），本計劃全部假設只做本地 commit。
 - 2.4 的工作量是估計值。
