@@ -33,7 +33,7 @@
    無縫換鑰、前向保密、區網入口、唯讀儀表板分享連結、image_url SSRF 防護、Docker 與 CI 的 v0.2 更新，
    都延後到 v0.3；TODO T1（LM Studio 的 Context size exceeded）只做了一半；出字速度（30 token/秒）是猜的。
 5. GitHub（ChouYangEn0401/LocalLLMOutsiderProvider）現況：dev 與 claude/youthful-galileo-u66ybv 兩條
-   分支是 v0.2.0（最新 commit 829d403…，以 bundle 內為準）；claude/lm-studio-e2e-encryption-ug09c3 是 B 版
+   分支是 v0.2.0（以我最新給的 bundle 為準，不會早於 829d403）；claude/lm-studio-e2e-encryption-ug09c3 是 B 版
    原樣；沒有 main；預設分支還指向 B 版那條。想建 main 的推送被雲端 session 的權限擋下，所以尚未做。
 6. 決策：決策表在 docs/plan/MERGE_PLAN.md 第 10 節。標「擁有者已決定」的 13 項不要改；「AI預設」的 11 項
    是暫定（D2、D6、D9、D15、D20～D26 等），我之後會自己看。凍結檔 docs/BU_Keep_* 與
@@ -42,7 +42,7 @@
 【我給你的檔案，以及各自要收到哪裡】（通常在 Downloads，共 5～7 個）
 | 檔案 | 是什麼 | 收到哪裡 |
 |---|---|---|
-| LocalLLMOutsiderProvider-dev.bundle | 原始碼加完整 git 歷史，只有 dev 分支。用我最新給的那份（head 應為 829d403…） | 還原成「新的獨立 git repo」資料夾 LocalLLMOutsiderProvider（跟我其他專案同一層，**不要放進 SYNOX、不要放進 LINEBotForChurch**）；bundle 檔本身再備份一份到該 repo 的 dist/ 資料夾（dist/ 已被 .gitignore，不進版控） |
+| LocalLLMOutsiderProvider-dev.bundle | 原始碼加完整 git 歷史，只有 dev 分支。用我最新給的那份（head 不會早於 829d403） | 還原成「新的獨立 git repo」資料夾 LocalLLMOutsiderProvider（跟我其他專案同一層，**不要放進 SYNOX、不要放進 LINEBotForChurch**）；bundle 檔本身再備份一份到該 repo 的 dist/ 資料夾（dist/ 已被 .gitignore，不進版控） |
 | llmop-0.2.0-windows-x64-portable.zip | Windows 免安裝版（28 MB，內含 Python） | 只複製到該 repo 的 dist/，**不解壓、不執行**；供之後在別台 Windows 電腦實測 |
 | localllm_outsider_provider-0.2.0-py3-none-any.whl | Python 安裝檔 | 同上，只放 dist/，不安裝 |
 | AGENT_SETUP.md、HumanTestList.md、HANDOFF.md | 接手說明、人工實測清單、交接文件 | 這三份已包含在 bundle 內的 docs/。若 bundle 裡的版本比我另外給的舊（例如沒有 HumanTestList.md），就用我給的覆蓋到 docs/ 並本機 commit 在 dev |
@@ -59,7 +59,7 @@ llmop 有三件事要 SYNOX 那邊配合，這是「待辦」，不是現在要�
 【步驟】
 1. 找出檔案，列出每個的路徑、大小、sha256。
 2. `git bundle verify` 檢查 bundle；`git clone -b dev <bundle> <新資料夾>`（一定要加 -b dev）；
-   確認 `git log --oneline -1` 是 829d403… 或更新，工作區乾淨。
+   確認 `git log --oneline -1` 不早於 829d403，工作區乾淨。
 3. 把 zip、whl、bundle 複製到新 repo 的 dist/（不要解壓、不要安裝）。
 4. 確認 docs/ 內有：HANDOFF.md、AGENT_SETUP.md、HumanTestList.md、ARCHIVE_PROMPT.md、plan/、security/、
    secure/、BU_Keep_* 與 BU_Keep.sha256；缺的就用我給的補上。
