@@ -3,7 +3,38 @@
 把自己電腦上的 **Ollama / LM Studio / vLLM / llama.cpp** 分享給少數親友，透過 **Cloudflare 通道**對外，前面加上
 **帳號、API key、等級與用量、排隊**。API 跟 OpenAI 相容。只有**一個模型**：請求裡的 `model` 一律換成 `config.yaml` 設定的那一個。
 
-完整 CLI 指令說明：[docs/CLI.md](docs/CLI.md)
+## 最快上手
+
+在專案資料夾執行。已有 Python 3.11 以上；Windows 免安裝版見後面「架設」。
+
+**Ollama**
+
+```bat
+ollama pull qwen3.5:9b
+llmop init --backend-type ollama --model qwen3.5:9b
+llmop check
+llmop serve --open
+```
+
+**LM Studio**
+
+先在 LM Studio 載入模型並開啟本機伺服器。埠號以 LM Studio 畫面顯示的為準（預設 1234，也可能是 1235 等）。
+
+```bat
+llmop init --backend-type lmstudio --backend-url http://localhost:1235 --model <模型 ID>
+llmop check
+llmop serve --open
+```
+
+- `llmop init` 只問 admin 密碼。後端與模型靠參數給；免安裝版的 `_first_run.bat` 才會問後端與模型。
+- 只給 `--backend-url`、不給 `--backend-type` 時，類型視為 `ollama`。LM Studio 一定要加 `--backend-type lmstudio`。
+- `llmop check` 連不上，多半是埠號或模型 ID 不對。
+- 要對外：`llmop serve --tunnel --open`（需要 cloudflared）。
+
+接下來：
+
+- 全部指令與參數：[docs/CLI.md](docs/CLI.md)
+- 目前狀態、決定、待辦：[docs/handoff/20261119-MVP-lmstudio-tunnel.md](docs/handoff/20261119-MVP-lmstudio-tunnel.md)（舊的 v0.2 總覽：[docs/HANDOFF.md](docs/HANDOFF.md)）
 
 交付物有兩樣：
 
@@ -11,8 +42,8 @@
 2. **用戶端外掛**（`llmop client`）：只有**加密模式**才需要，裝在使用者的電腦上。直連（明文）模式的使用者什麼都不用裝，
    用任何 OpenAI 相容工具即可。
 
-> 這是給少數人用的小型服務，不是商業級服務。v0.2 還沒在真的 Windows／真的 LLM／真的 cloudflared 上實測過，見
-> [docs/HANDOFF.md](docs/HANDOFF.md)。
+> 這是給少數人用的小型服務，不是商業級服務。2026-11-19 已在 Windows 上用 LM Studio 與 Cloudflare quick tunnel 實測直連模式；
+> 加密模式與 Ollama 尚未在真機實測，見交接文件。
 
 ## 三個入口
 
@@ -30,8 +61,6 @@
   `server.public_stream: true`。本機 `/v1` 一律可以串流。
 
 ## 架設
-
-> 每個指令的完整說明見 [docs/CLI.md](docs/CLI.md)。
 
 ### Windows 免安裝版（推薦）
 
@@ -71,23 +100,22 @@ llmop init --backend-type ollama --model qwen3.5:9b
 llmop serve --tunnel --open
 ```
 
-`llmop init` 建立 `config.yaml` 並設定 admin 密碼。用 LM Studio 的話：
+`llmop init` 建立 `config.yaml` 並設定 admin 密碼。用 LM Studio 時改用「最快上手」的 LM Studio 那組指令。
+不加 `--tunnel` 時，通道依 `tunnels.ui.enabled`／`tunnels.api.enabled`；`--no-tunnel` 則完全不開。
+`[secure]` 是加密模式要的套件；只用直連可以省略。worker 與用戶端的私鑰放在 `$LLMOP_HOME`（預設 `~/.llmop`），同樣不能外流。
 
-```bash
-llmop init --backend-type lmstudio --backend-url http://localhost:1234 --model <模型名稱>
-```
+### 本機控制台：換後端、換模型（不用重啟）
 
-LM Studio 的埠號以 LM Studio 自己顯示的為準（預設 1234，也可能是別的，例如 1235），所以 `--backend-url` 要照實填；
-不填會用預設值，之後 `llmop check` 連不上就是埠號不對。不加 `--tunnel` 時，通道依
-`tunnels.ui.enabled`／`tunnels.api.enabled`；`--no-tunnel` 則完全不開。`[secure]` 是加密模式要的套件；只用直連可以省略。
-worker 與用戶端的私鑰放在 `$LLMOP_HOME`（預設 `~/.llmop`），同樣不能外流。
+開 `http://127.0.0.1:8781/`，用 admin 登入，找「LLM 後端」。這一區**只有控制台有，沒有 CLI 指令**。
 
-### 啟動後換後端、換模型（不用重啟）
+1. 看目前的類型、網址與模型。
+2. 改類型（ollama／lmstudio／vllm／llamacpp／openai）與網址。
+3. 按「列出模型」（LM Studio 會標出已載入的）。
+4. 模型欄選「沿用目前設定」或挑一個。
+5. 按「啟用」。
 
-在本機控制台 `http://127.0.0.1:8781/` 的「LLM 後端」區塊：看目前的類型、網址與模型；改類型（ollama／lmstudio／vllm／llamacpp／openai）
-與網址 → 按「列出模型」（LM Studio 會標出哪些已載入）→ 選「沿用目前設定」或挑一個模型 → 按「啟用」。
-它會用保留註解的方式寫進 `config.yaml`，立刻生效，不必重啟。只有本機控制台的管理員登入看得到；外網入口沒有這一區。
-「啟用」只改設定；LM Studio 若沒載入那個模型，要靠它自己的即時載入（第一個請求會比較慢）。
+「啟用」會把設定寫進 `config.yaml`（保留註解）並熱載入，不必重啟。它只改設定；LM Studio 若沒載入那個模型，靠它自己的即時載入（第一個請求較慢）。
+外網入口沒有這一區。
 
 ### 直連模式（明文）
 
@@ -98,6 +126,9 @@ from openai import OpenAI
 client = OpenAI(base_url="https://<api 主機>/<秘密路徑>/v1", api_key="sk-llop-...")
 print(client.chat.completions.create(model="any", messages=[{"role": "user", "content": "你好"}]).choices[0].message.content)
 ```
+
+**目前的模型是「思考模型」。** 回覆會先花 token 思考，`max_tokens` 太小時 `content` 可能是空的。
+呼叫時把 `max_tokens` 設在 2000 以上，或在 LM Studio 關掉該模型的 thinking。
 
 端點：`GET /v1/models`（只有一筆）、`POST /v1/chat/completions`、`POST /v1/completions`、`POST /v1/embeddings`、`GET /v1/me`
 （等級、NORMAL／LOW、兩個用量表的剩餘量與重置時間、排隊位置）。錯誤格式跟 OpenAI 一樣，429 會帶 `Retry-After`。
@@ -156,16 +187,21 @@ llmop tunnel rotate-api
 llmop tunnel rotate-api --change-host --grace 600
 ```
 
-  `--change-host` 連主機名一起換（只重啟通道 `api`，要有執行中的 `llmop serve`）；`--grace 600` 讓舊連結再通 10 分鐘。
+  `--change-host` 連主機名一起換（只重啟通道 `api`；沒有執行中的 `llmop serve` 時只換秘密路徑並印警告）；`--grace 600` 讓舊連結再通 10 分鐘。
   本機控制台與 `Rotate-API-Link.bat` 做的是同一件事。每次更換都會留稽核紀錄。
 
-### 自動定期更換 API 連結（本機控制台）
+### 自動定期更換 API 連結（只有本機控制台）
 
-在本機控制台（`127.0.0.1:8781`）的「API 連結自動更換」可以自己填更換週期（數字＋小時／天，可填小數，例如 3.5 天；`0` = 關閉）
-和舊連結的寬限期（必須比週期短）。儲存設定後會從現在重新計時，立即生效，不用重啟。
-「延期」可以不斷往後延；「立即更換」馬上換並重新計時。手動、`llmop tunnel rotate-api`、自動更換都會讓計時重來。
-只換秘密路徑：用 quick tunnel 時，主機名在 cloudflared 重啟時仍會變，所以週期只有在具名通道（named tunnel）下才準。
-需要 `llmop serve` 在執行才會自動更換；關機錯過期限，下次啟動後一分鐘內會補換。
+開 `http://127.0.0.1:8781/` →「API 連結自動更換」。這一區**沒有 CLI 指令**。
+
+- **更換週期**：數字＋單位（小時／天，可填小數，如 3.5 天）。`0` = 關閉。
+- **寬限期**：舊連結再通多久，單位同上。必須比週期短。
+- 按儲存：從**現在**重新計時，立即生效，不用重啟。
+- **延期**：把下次更換往後推，可以重複按。
+- **立即更換**：馬上換，並重新計時。手動更換與 `llmop tunnel rotate-api` 也會讓計時重來。
+- 設定與下次更換時間存在資料庫（`data\`），不在 `config.yaml`。
+- 只換秘密路徑。用 quick tunnel 時，cloudflared 或 `llmop serve` 一重啟，主機名就會變；週期只有在具名通道（named tunnel）下才準。
+- 要 `llmop serve` 在執行才會自動換；關機錯過期限，下次啟動後一分鐘內補換。
 
 ## 讓 SYNOX 使用（在 SYNOX 那一側設定）
 
@@ -183,7 +219,7 @@ llmop tunnel rotate-api --change-host --grace 600
 
 | 指令 | 用途 |
 |---|---|
-| `llmop init` | 建立 `config.yaml` 和 admin 密碼（`--backend-type`、`--backend-url`、`--model`） |
+| `llmop init` | 建立 `config.yaml`（只問 admin 密碼；`--backend-type`、`--backend-url`、`--model`） |
 | `llmop serve` | 啟動整個節點（`--tunnel`／`--no-tunnel`、`--worker`／`--no-worker`、`--open`） |
 | `llmop check` | 檢查設定和 LLM 是否連得上 |
 | `llmop add-user NAME` | 新增帳號；`llmop set-password NAME` 改密碼 |
@@ -192,7 +228,7 @@ llmop tunnel rotate-api --change-host --grace 600
 | `llmop worker init` / `llmop worker run` | 加密模式的 worker |
 | `llmop client keygen` / `llmop client proxy` | 加密模式的用戶端外掛 |
 
-全域選項 `-c PATH` 指定設定檔（預設 `$LLMOP_CONFIG` 或 `config.yaml`）。範例設定見 [config.example.yaml](config.example.yaml)。
+全域選項 `-c PATH` 指定設定檔（預設 `$LLMOP_CONFIG` 或 `config.yaml`）。完整說明見 [docs/CLI.md](docs/CLI.md)；範例設定見 [config.example.yaml](config.example.yaml)。
 
 ## 一定要知道的限制
 
@@ -206,6 +242,39 @@ llmop tunnel rotate-api --change-host --grace 600
 - **VIP 帳號的 API 金鑰只能在本機控制台建立**（AI 預設，R-10）：VIP 沒有或只有很高的用量上限，帳號網站（外網）拒絕 VIP I／II／III 建立 key；一般帳號照常在帳號網站自己建立。
 - **更換 API 連結後，別台電腦的 worker 要改設定。** 它們的 `gateway_url` 是 `wss://<API 連結>/worker/ws`；經由舊連結連入的 worker 在舊連結失效時會被切斷（本機的 worker 不受影響）。
 - Docker 與 CI 檔案是 v0.1 時代的，還沒有為 v0.2 更新（[docs/HANDOFF.md](docs/HANDOFF.md)）。
+
+## 疑難排解
+
+**更新程式碼後，新功能沒出現，或 pip 失敗**
+
+先停掉 `llmop serve`，再重新安裝：
+
+```bat
+.venv\Scripts\python.exe -m pip install -e .
+```
+
+serve 還在跑時，`.venv\Scripts\llmop.exe` 被鎖住，pip 會報 `WinError 32`。安裝中途失敗可能留下
+`ModuleNotFoundError: No module named 'llmop'`；停掉 serve 後再裝一次即可。安裝完再啟動 serve。
+
+**`data	unnel*.lock` 這些檔案能刪嗎**
+
+不要刪。它們是作業系統檔案鎖，檔案存在不代表有行程在跑。
+
+**目前的 API 連結在哪**
+
+`llmop tunnel show-api`，或本機控制台 `http://127.0.0.1:8781/` 的「通道與 API 連結」。連結含秘密路徑，不要貼到公開處。
+
+**找不到 `cloudflared`**
+
+用 `winget install --id Cloudflare.cloudflared` 裝完後，要**開新的終端機**才會在 PATH 裡。或用 `llmop tunnel --cloudflared <路徑>` 指定。
+
+**`llmop check` 連不上 LM Studio**
+
+埠號不對。照 LM Studio 畫面修正：本機控制台「LLM 後端」改網址，或重跑 `llmop init --force ...`。
+
+**回答是空的**
+
+見「直連模式」：思考模型要 `max_tokens` ≥ 2000，或關掉 thinking。
 
 ## 安全邊界
 
@@ -249,7 +318,7 @@ python -m venv .venv
 .venv/bin/python scripts/build_portable.py
 ```
 
-文件：[交接文件](docs/HANDOFF.md)（狀態、v0.3 待辦、發版方式）· [加密模式](docs/secure/README.md) ·
+文件：[CLI 指令說明](docs/CLI.md) · [目前交接](docs/handoff/20261119-MVP-lmstudio-tunnel.md) · [v0.2 總覽](docs/HANDOFF.md)（v0.3 待辦、發版方式）· [加密模式](docs/secure/README.md) ·
 [等級與用量規則](docs/plan/TIERS_AND_USAGE_RULES.md) · [合併計畫（決策表在第 10 節）](docs/plan/MERGE_PLAN.md)
 
 ## License

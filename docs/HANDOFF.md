@@ -1,5 +1,9 @@
 # 交接文件 — LocalLLMOutsiderProvider v0.2
 
+> **最新狀態請看 [docs/handoff/20261119-MVP-lmstudio-tunnel.md](handoff/20261119-MVP-lmstudio-tunnel.md)。**
+> 2026-11-19 已在 Windows 上用 LM Studio 與 Cloudflare quick tunnel 實測直連模式，所以下面 3.3 節「還沒有人做過」
+> 對這幾項已不成立（加密模式、Ollama、免安裝版 zip 仍未實測）。本文其餘部分保留當歷史紀錄。
+
 > 最後更新：2026-11-19（v0.2.0，本機分支 `dev`）。給接手的人（包含未來的自己）。
 > 使用方式看 [README](../README.md)；所有設計決策的唯一依據是 [合併計畫第 10 節「決策定案表」](plan/MERGE_PLAN.md)；
 > 本版範圍與分工是 [派工單](plan/DISPATCH.md)；等級與用量的規則與數字是 [TIERS_AND_USAGE_RULES.md](plan/TIERS_AND_USAGE_RULES.md)。

@@ -14,6 +14,24 @@ llmop <指令> ...                         :: 已啟用 venv 或已安裝到 PAT
 
 > 免安裝版（portable zip）可雙擊 `Command-Prompt.bat`，開出的視窗裡直接打 `llmop ...` 即可。
 
+## 常見任務索引
+
+控制台 = 本機控制台 `http://127.0.0.1:8781/`（只有這台電腦、admin 登入）。
+
+| 我想要 | 用什麼 | 做法 |
+|---|---|---|
+| 換模型 | 控制台 | 「LLM 後端」→ 列出模型 → 選模型 → 啟用。立即生效 |
+| 換後端（類型／網址／埠號） | 控制台 | 「LLM 後端」改類型與網址 → 列出模型 → 啟用。也可 `llmop init --force ...`（會重建 `config.yaml`） |
+| 看目前 API 連結 | CLI 或控制台 | `llmop tunnel show-api`；或控制台「通道與 API 連結」 |
+| 換 API 連結 | CLI 或控制台 | `llmop tunnel rotate-api [--change-host] [--grace 秒]`；或控制台「通道與 API 連結」 |
+| 設定自動定期更換 | **只有控制台** | 「API 連結自動更換」。沒有 CLI 指令 |
+| 新增使用者 | CLI | `llmop add-user NAME --generate`（免重啟） |
+| 發 key 給有帳號的人 | 帳號網站 | 對方登入自己建立（只顯示一次）。VIP 帳號的 key 只能在控制台建立 |
+| 發臨時（GUEST）key | **只有控制台** | 「GUEST 金鑰」 |
+| 撤銷 key | CLI 或控制台 | `llmop keys` 查 ID → `llmop revoke-key ID`；或控制台「所有帳號的 API 金鑰」 |
+
+**只有控制台能做、CLI 沒有的**：LLM 後端面板（換類型／網址／模型）、API 連結自動更換設定（週期、寬限期、延期、立即更換）、發 GUEST key。
+
 ---
 
 ## 1. 常見流程（快速上手）
@@ -73,7 +91,7 @@ API 連結含秘密路徑（`https://....trycloudflare.com/<秘密>/v1`），外
 llmop tunnel show-api                                    :: 看目前連結
 llmop tunnel rotate-api                                  :: 立刻換新連結，舊的馬上失效
 llmop tunnel rotate-api --grace 600 --reason "外流"      :: 舊連結再保留 10 分鐘
-llmop tunnel rotate-api --change-host --grace 600        :: 連主機名一起換（需有執行中的 llmop serve）
+llmop tunnel rotate-api --change-host --grace 600        :: 連主機名一起換（要有執行中的 llmop serve）
 ```
 
 ### 1.6 檢查
@@ -193,13 +211,19 @@ llmop init --force
 
 **用途**：算出密碼雜湊，手動貼進 `config.yaml` 的 `password_hash`。
 
-**語法**：`llmop hash-password [--password PW]`
+**語法**
+```
+llmop hash-password [--password PW]
+```
 
 | 參數 | 說明 |
 |---|---|
 | `--password PW` | 要雜湊的密碼；預設互動詢問（不顯示）。 |
 
-**範例**：`llmop hash-password`
+**範例**
+```bat
+llmop hash-password
+```
 
 **注意**：只印出雜湊，不改任何檔案。一般情況直接用 `add-user` / `set-password` 即可。
 
@@ -238,7 +262,10 @@ llmop add-user carol --role admin
 
 **用途**：修改某帳號在 `config.yaml` 中的密碼。
 
-**語法**：`llmop set-password USERNAME [--password PW | --generate]`
+**語法**
+```
+llmop set-password USERNAME [--password PW | --generate]
+```
 
 | 參數 | 說明 |
 |---|---|
@@ -246,7 +273,11 @@ llmop add-user carol --role admin
 | `--password PW` | 新密碼；預設互動詢問。 |
 | `--generate` | 產生隨機密碼並印出。 |
 
-**範例**：`llmop set-password admin`、`llmop set-password bob --generate`
+**範例**
+```bat
+llmop set-password admin
+llmop set-password bob --generate
+```
 
 **注意**：修改 `config.yaml`。（是否需重啟請以實測為準；`add-user` 已確認會熱載入，本指令走同一個設定檔編輯機制。）
 
@@ -301,7 +332,7 @@ llmop tunnel [show-api | rotate-api] [--change-host] [--grace SECONDS] [--reason
 |---|---|
 | `show-api` | 印出目前的 API 連結（含秘密路徑，不要貼到公開處）。 |
 | `rotate-api` | 產生新的秘密 API 連結。舊連結預設立刻失效。 |
-| `--change-host` | 僅 `rotate-api`：連同通道主機名一起換（重啟 `api` 通道）。需有執行中的 `llmop serve`。 |
+| `--change-host` | 僅 `rotate-api`：連同通道主機名一起換（重啟 `api` 通道）。要有執行中的 `llmop serve`；沒有時等待逾時後只換秘密路徑，並印警告。 |
 | `--grace SECONDS` | 僅 `rotate-api`：舊連結再保留多少秒，預設 `0`。要讓使用者有時間改設定時用，例如 `600`。 |
 | `--reason TEXT` | 僅 `rotate-api`：寫進稽核紀錄的原因，預設空。 |
 | `--url URL` | 僅「只跑通道」模式：本機伺服器網址，預設取自設定（`http://127.0.0.1:8780`）。 |
@@ -322,9 +353,19 @@ llmop tunnel --cloudflared "C:\Tools\cloudflared.exe"
 
 ### 3.7 `llmop check`
 
-**用途**：驗證 `config.yaml`、列出帳號、實際測試 LLM 後端是否連得上。**唯讀**，沒有自己的參數（只有全域 `--config`）。
+**用途**：驗證 `config.yaml`、列出帳號、實際測試 LLM 後端是否連得上。**唯讀**。
 
-**範例**：`llmop check`
+**語法**
+```
+llmop check
+```
+
+**參數**：沒有（只有全域 `--config`）。
+
+**範例**
+```bat
+llmop check
+```
 
 **注意**：第一次設定完、換模型或換埠號後都先跑一次。對應 `.bat`：`Check.bat`。
 
@@ -332,12 +373,21 @@ llmop tunnel --cloudflared "C:\Tools\cloudflared.exe"
 
 **用途**：顯示各帳號的 token 用量。唯讀。
 
+**語法**
+```
+llmop usage [--days N] [--user NAME]
+```
+
 | 參數 | 說明 |
 |---|---|
 | `--days N` | 統計最近 N 天，預設 `30`。 |
 | `--user NAME` | 只看某一帳號的明細。 |
 
-**範例**：`llmop usage --days 7`、`llmop usage --user bob`
+**範例**
+```bat
+llmop usage --days 7
+llmop usage --user bob
+```
 
 **注意**：資料庫尚不存在時只會提示尚無紀錄。
 
@@ -345,20 +395,36 @@ llmop tunnel --cloudflared "C:\Tools\cloudflared.exe"
 
 **用途**：列出 API 金鑰（**永不顯示秘密部分**，只顯示 ID 等資訊）。唯讀。
 
+**語法**
+```
+llmop keys [--user NAME] [--all]
+```
+
 | 參數 | 說明 |
 |---|---|
 | `--user NAME` | 只列某帳號的金鑰。 |
 | `--all` | 連已撤銷的金鑰一起列。 |
 
-**範例**：`llmop keys --user bob --all`
+**範例**
+```bat
+llmop keys --user bob --all
+```
 
 ### 3.10 `llmop revoke-key`
 
 **用途**：以 ID 撤銷一把 API 金鑰（ID 從 `llmop keys` 取得）。
 
-**語法**：`llmop revoke-key ID`
+**語法**
+```
+llmop revoke-key ID
+```
 
-**範例**：`llmop revoke-key <ID>`
+**參數**：`ID`（必填），從 `llmop keys` 取得。
+
+**範例**
+```bat
+llmop revoke-key <ID>
+```
 
 **注意**：寫入資料庫，撤銷後該金鑰立即不能用；無法復原，需讓使用者重新建立。
 
@@ -473,7 +539,23 @@ llmop client proxy
 
 ## 6. 常見問題
 
-- **`llmop check` 連不上 LM Studio**：埠號不對。以 LM Studio 畫面為準，重新 `llmop init --force --backend-type lmstudio --backend-url http://localhost:<埠號> --model <名稱>`，或直接編輯 `config.yaml` 的 `backends`。
+- **`llmop check` 連不上 LM Studio**：埠號不對。以 LM Studio 畫面為準，在控制台「LLM 後端」改網址，或 `llmop init --force --backend-type lmstudio --backend-url http://localhost:<埠號> --model <名稱>`，或直接編輯 `config.yaml` 的 `backends`。
 - **`init` 說檔案已存在**：加 `--force`（會留 `.bak`），或改用 `set-password` 改密碼。
 - **加密模式報 `needs the secure extra`**：`pip install "localllm-outsider-provider[secure]"`。
 - **API 連結外流**：立刻 `llmop tunnel rotate-api`，並通知使用者與遠端 worker 更新連結。
+- **pip 安裝失敗 `WinError 32`**：先停掉 `llmop serve`，再 `.venv\Scripts\python.exe -m pip install -e .`。
+- **新開的終端機才找得到 `cloudflared`**：winget 安裝後 PATH 要重新載入。
+
+## 7. 已知怪癖
+
+- `--version` 只能放在指令前：`llmop --version`。
+- `--config` 可放在指令前或後；`worker`、`client` 不吃 `--config`。
+- `init` 只給 `--backend-url` 時，類型視為 `ollama`；LM Studio 必須加 `--backend-type lmstudio`。
+- `init` 本身只問 admin 密碼；問後端與模型的是免安裝版的 `_first_run.bat`。
+- `init` 不會測試後端網址，埠號填錯要等 `llmop check` 才知道。
+- `--password`／`--admin-password` 寫在命令列會留在歷史紀錄；手動執行請用互動輸入。
+- `tunnel` 有隱藏參數 `--wait`（不在 `--help`），可忽略。
+- `tunnel rotate-api --change-host` 沒有執行中的 serve 時不會失敗，只換秘密路徑並印警告。
+- `serve --host`／`--port` 是 v0.1 單一入口相容模式，不要用。
+- `set-password` 是否熱載入尚未實測（`add-user` 已確認會）。
+- 控制台的模型選單會把 embedding 模型也列出來。
