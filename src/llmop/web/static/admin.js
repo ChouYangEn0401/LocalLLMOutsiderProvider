@@ -3,7 +3,7 @@
    refill), GUEST keys, workers and enrolment tokens, all keys, raw config editing.
    On the public surface the same page is a masked, read-only view: the server has no
    write routes there, and no write control is drawn.
-   Every server string goes through textContent (LL.h children), never innerHTML. */
+   Every server string goes through textContent (LL.h children); no HTML parsing. */
 (function () {
   'use strict';
 
@@ -171,7 +171,9 @@
       parts.push(h('div', { class: 'copy-line' }, input, LL.copyButton(() => link.url)));
       if (link.updated_at) parts.push(h('p', { class: 'small muted' }, '更新於 ', LL.timeEl(link.updated_at)));
     } else {
-      parts.push(h('p', { class: 'muted' }, link.available ? '目前沒有 API 連結。' : 'API 連結功能尚未啟用。'));
+      let note = link.available ? '目前沒有 API 連結。' : 'API 連結功能尚未啟用。';
+      if (o.surface === 'public' && link.available) note = '唯讀檢視不顯示 API 連結；請看入口網頁。';
+      parts.push(h('p', { class: 'muted' }, note));
     }
     if (canWrite && link.available) {
       const reason = h('input', { type: 'text', maxlength: 200, placeholder: '原因（選填）', 'aria-label': '更換原因' });

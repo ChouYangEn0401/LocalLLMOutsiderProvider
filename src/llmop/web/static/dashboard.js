@@ -1,7 +1,7 @@
 /* Portal: tier + status, the two usage tables (1.5-hour bucket, weekly), the current
    API link, the user's own API keys (create / revoke / encryption / signing public
    key / per-key usage), the queue, how-to and recent requests.
-   Every server string goes through textContent (LL.h children), never innerHTML. */
+   Every server string goes through textContent (LL.h children); no HTML parsing. */
 (function () {
   'use strict';
 
