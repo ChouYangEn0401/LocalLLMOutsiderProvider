@@ -7,7 +7,7 @@ name = "localllm-outsider-provider"
 dynamic = ["version"]
 description = "Expose local LLM services (Ollama / vLLM / any OpenAI-compatible server) to online users with lightweight session login, API keys and token quotas."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "ChouYangEn0401" }]
@@ -25,10 +25,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "respx>=0.21", "build>=1.0"]
+secure = ["cryptography>=47", "aiohttp>=3.9", "websockets>=12"]
+dev = ["pytest>=8", "respx>=0.21", "build>=1.0", "pytest-aiohttp", "pytest-asyncio", "pyhpke"]
 
 [project.scripts]
-llmop = "llmop.cli:main"
+llmop = "llmop.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/ChouYangEn0401/LocalLLMOutsiderProvider"
@@ -41,7 +42,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 llmop = ["web/static/*", "examples/*"]
+"llmop.gateway" = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

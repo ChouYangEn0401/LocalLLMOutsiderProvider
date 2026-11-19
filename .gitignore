@@ -10,3 +10,16 @@ __pycache__/
 *.sqlite3*
 public_url.txt
 .env
+*.py[cod]
+build/
+dist/
+venv/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.llmop/
+*.db
+.idea/
+.vscode/
+.DS_Store
