@@ -93,6 +93,18 @@ def test_failed_replace_leaves_no_partial_file(tmp_path, monkeypatch):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["config.json"]
 
 
+@pytest.mark.parametrize("secret", [True, False])
+def test_write_json_without_fchmod(tmp_path, monkeypatch, secret):
+    """Windows（Python 3.12）沒有 os.fchmod：照樣寫得成功、不留暫存檔。"""
+    monkeypatch.delattr(paths.os, "fchmod", raising=False)
+    assert not hasattr(os, "fchmod")
+    target = tmp_path / "keys.json"
+    target.write_text("{}")
+    paths.write_json(target, {"k": "v"}, secret=secret)
+    assert paths.read_json(target) == {"k": "v"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["keys.json"]
+
+
 def test_read_json_requires_object(tmp_path):
     target = tmp_path / "list.json"
     target.write_text("[1, 2]")

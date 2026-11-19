@@ -32,6 +32,7 @@ def write_json(path: str | os.PathLike, data: dict, *, secret: bool = False) -> 
     """以原子方式寫入 JSON：先寫同目錄的暫存檔，再 os.replace。
 
     secret=True 時，暫存檔在寫入任何內容之前就是 0600 權限。
+    沒有 os.fchmod 的平台（例如 Windows）略過 chmod；那裡的 0600 本來就沒有效果。
     失敗時不留下暫存檔，原本的檔案保持不變。
     """
     path = Path(path)
@@ -40,8 +41,9 @@ def write_json(path: str | os.PathLike, data: dict, *, secret: bool = False) -> 
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if secret else 0o644)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            if secret:
-                os.fchmod(fh.fileno(), 0o600)  # 不受 umask 影響，確定是 0600
+            fchmod = getattr(os, "fchmod", None)
+            if secret and fchmod is not None:
+                fchmod(fh.fileno(), 0o600)  # 不受 umask 影響，確定是 0600
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())

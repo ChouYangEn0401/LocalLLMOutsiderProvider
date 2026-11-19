@@ -86,3 +86,12 @@ def new_csrf_token() -> str:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_hex(8)}"
+
+
+# Worker enrolment secrets (same format as B's gateway: prefix + base64url, no padding).
+def new_reg_token() -> str:
+    return "llmop_reg_" + secrets.token_urlsafe(24)
+
+
+def new_worker_token() -> str:
+    return "llmop_wk_" + secrets.token_urlsafe(32)

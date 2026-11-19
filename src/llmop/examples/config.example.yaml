@@ -13,6 +13,14 @@ server:
   cookie_secure: auto      # auto | always | never
   title: "Local LLM Outsider Provider"
 
+# What this machine runs: gateway (API + accounts + web), worker (decrypts next to
+# the LLM, for encrypted keys), client (local proxy that encrypts for your apps).
+roles: [gateway]
+
+# The one model every request uses. The "model" field of a request is always replaced
+# by this. Empty = not set.
+model: ""
+
 # Local LLM servers behind the gateway. type: ollama | vllm | lmstudio | llamacpp | openai
 # All are reached through their OpenAI-compatible /v1 API; Ollama also gets
 # native extras (model listing from /api/tags, context length from /api/show).
@@ -46,12 +54,15 @@ default_quota:
   max_concurrent: 2
   max_tokens_per_request: 4096
 
-# Accounts. max_api_keys: 0 = this account cannot create API keys (web playground only).
+# Accounts. tier: vip3 | vip2 | vip1 | normal (default normal); any tier value
+# (bucket, weekly, max_concurrent, ...) can be overridden per account.
+# max_api_keys: default 1; 0 = this account cannot create API keys (web playground only).
 # Create a password hash with:   llmop hash-password
 # (or: python -m llmop hash-password)
 accounts:
   admin:
     role: admin
+    tier: vip3
     display_name: Owner
     password_hash: "REPLACE_ME_run_llmop_hash-password"
     quota:
@@ -59,6 +70,7 @@ accounts:
       tokens_per_month: 0
   # friend1:
   #   role: user
+  #   tier: normal             # or e.g. vip1, and override one value:  bucket: 300000
   #   display_name: Friend
   #   password_hash: "scrypt$32768$8$1$...."
   #   models: ["qwen3.5:9b"]   # which models this account may use ("*" = all)
@@ -73,3 +85,47 @@ tunnel:
                            # named = your own domain, stable URL (needs token)
   cloudflared: cloudflared # path to cloudflared(.exe) if not on PATH
   token: ""                # mode: named -> env:CLOUDFLARE_TUNNEL_TOKEN
+
+# The local, key-less /v1 on this machine is billed to this account.
+# Empty = the first admin account.
+local_account: ""
+
+# Ports of the three entry points (all on 127.0.0.1).
+listeners:
+  local: 8781              # local console + key-less /v1 (this machine only)
+  public_ui: 8780          # account website (tunnel "ui")
+  public_api: 8782         # API link: /<secret>/v1, /<secret>/e2e/v1, /<secret>/worker/ws (tunnel "api")
+
+# Two independent tunnels, same settings as "tunnel" above. "ui" (account website)
+# is rarely restarted; "api" can be replaced at any time ("change API link").
+tunnels:
+  ui:
+    enabled: false
+    mode: quick
+  api:
+    enabled: false
+    mode: quick
+
+# Usage meters (docs/plan/TIERS_AND_USAGE_RULES.md). Usage is counted after each request.
+usage:
+  window_seconds: 5400     # the 1.5-hour bucket refills from empty to full in this time
+  recover_at: 0.25         # LOW goes back to NORMAL when the bucket is back to 25%
+  debt_floor: 0.25         # the bucket may go down to -25%
+  low_mode: wait           # wait = LOW waits behind everyone | block = 429 until recovered
+  week_reset: { weekday: sun, time: "04:00", timezone: local }   # local or e.g. Asia/Taipei
+
+# Tiers. No bucket / weekly = not limited. Leave out a tier to keep these defaults.
+tiers:
+  vip3:   { priority: 1, max_concurrent: 3 }
+  vip2:   { priority: 2, max_concurrent: 2 }
+  vip1:   { priority: 3, max_concurrent: 2, bucket: 240000, weekly: 3000000, on_bucket_empty: as_normal }
+  normal: { priority: 4, max_concurrent: 1, bucket: 80000,  weekly: 1000000 }
+  guest:  { priority: 5, max_concurrent: 1, bucket: 20000,  budget: 50000, reset: false }
+
+# Queue for the shared slots.
+queue:
+  slots: 6                 # must match the backend's parallel slots and context
+  max_length: 30           # whole queue; more -> 503
+  max_per_account: 2       # waiting requests per account; more -> 429
+  max_wait_seconds: { public: 60, local: 600 }
+  fair_share_every: 6      # every 6th start goes to the longest-waiting NORMAL / GUEST
