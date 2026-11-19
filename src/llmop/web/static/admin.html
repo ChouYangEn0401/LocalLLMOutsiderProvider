@@ -36,6 +36,78 @@
     <div class="card flush"><div class="table-wrap" id="backends"></div></div>
   </section>
 
+  <section class="section write-only hidden" aria-labelledby="h-rot" id="rot-section">
+    <div class="section-head">
+      <h2 id="h-rot">API 連結自動更換 (Auto rotation)</h2>
+      <p class="small muted">只換秘密路徑；改設定會從現在重新計時，立即生效，不用重新啟動。</p>
+    </div>
+    <div class="card">
+      <div id="rot-status"></div>
+      <div class="row-form">
+        <div class="field">
+          <label for="rot-interval">更換週期（0 = 關閉自動更換）</label>
+          <input id="rot-interval" type="number" min="0" step="any" inputmode="decimal" value="0">
+        </div>
+        <div class="field">
+          <label for="rot-unit">單位</label>
+          <select id="rot-unit"><option value="days">天</option><option value="hours">小時</option></select>
+        </div>
+        <div class="field">
+          <label for="rot-grace">舊連結寬限期</label>
+          <input id="rot-grace" type="number" min="0" step="any" inputmode="decimal" value="0">
+        </div>
+        <div class="field">
+          <label for="rot-grace-unit">單位</label>
+          <select id="rot-grace-unit"><option value="hours">小時</option><option value="days">天</option></select>
+        </div>
+        <button class="btn primary" id="rot-save" type="button">儲存並重新計時</button>
+      </div>
+      <div class="row-form">
+        <div class="field">
+          <label for="rot-ext">延期</label>
+          <input id="rot-ext" type="number" min="0" step="any" inputmode="decimal" value="1">
+        </div>
+        <div class="field">
+          <label for="rot-ext-unit">單位</label>
+          <select id="rot-ext-unit"><option value="days">天</option><option value="hours">小時</option></select>
+        </div>
+        <button class="btn" id="rot-extend" type="button">延期</button>
+        <button class="btn danger" id="rot-now" type="button">立即更換</button>
+      </div>
+      <p class="form-error" id="rot-error" role="alert"></p>
+    </div>
+  </section>
+
+  <section class="section write-only hidden" aria-labelledby="h-llm" id="llm-section">
+    <div class="section-head">
+      <h2 id="h-llm">LLM 後端 (LLM backend)</h2>
+      <p class="small muted">改完立即生效，不用重新啟動；會寫進設定檔（保留註解）。</p>
+    </div>
+    <div class="card">
+      <div id="llm-current"></div>
+      <form id="llm-form" class="row-form" method="post" novalidate>
+        <div class="field">
+          <label for="llm-type">類型 (type)</label>
+          <select id="llm-type"></select>
+        </div>
+        <div class="field grow">
+          <label for="llm-url">網址 (base_url)</label>
+          <input id="llm-url" type="text" maxlength="300" autocomplete="off" spellcheck="false"
+                 placeholder="例如 localhost:1234（LM Studio 顯示的埠號）">
+        </div>
+        <button class="btn" id="llm-list" type="button">列出模型</button>
+      </form>
+      <div class="row-form">
+        <div class="field grow">
+          <label for="llm-model">模型 (model)</label>
+          <select id="llm-model"><option value="">沿用目前設定</option></select>
+        </div>
+        <button class="btn primary" id="llm-apply" type="button">啟用</button>
+      </div>
+      <p class="form-error" id="llm-error" role="alert"></p>
+    </div>
+  </section>
+
   <section class="section" aria-labelledby="h-users">
     <div class="section-head">
       <h2 id="h-users">帳號與等級 (Accounts &amp; tiers)</h2>

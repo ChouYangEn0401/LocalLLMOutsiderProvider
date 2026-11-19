@@ -3,6 +3,8 @@
 把自己電腦上的 **Ollama / LM Studio / vLLM / llama.cpp** 分享給少數親友，透過 **Cloudflare 通道**對外，前面加上
 **帳號、API key、等級與用量、排隊**。API 跟 OpenAI 相容。只有**一個模型**：請求裡的 `model` 一律換成 `config.yaml` 設定的那一個。
 
+完整 CLI 指令說明：[docs/CLI.md](docs/CLI.md)
+
 交付物有兩樣：
 
 1. **伺服器**（`llmop serve`）：閘道＋網頁＋（可選）worker，跑在有 GPU 的那台電腦上。
@@ -28,6 +30,8 @@
   `server.public_stream: true`。本機 `/v1` 一律可以串流。
 
 ## 架設
+
+> 每個指令的完整說明見 [docs/CLI.md](docs/CLI.md)。
 
 ### Windows 免安裝版（推薦）
 
@@ -67,9 +71,23 @@ llmop init --backend-type ollama --model qwen3.5:9b
 llmop serve --tunnel --open
 ```
 
-`llmop init` 建立 `config.yaml` 並設定 admin 密碼（LM Studio 用 `--backend-type lmstudio`）。不加 `--tunnel` 時，通道依
+`llmop init` 建立 `config.yaml` 並設定 admin 密碼。用 LM Studio 的話：
+
+```bash
+llmop init --backend-type lmstudio --backend-url http://localhost:1234 --model <模型名稱>
+```
+
+LM Studio 的埠號以 LM Studio 自己顯示的為準（預設 1234，也可能是別的，例如 1235），所以 `--backend-url` 要照實填；
+不填會用預設值，之後 `llmop check` 連不上就是埠號不對。不加 `--tunnel` 時，通道依
 `tunnels.ui.enabled`／`tunnels.api.enabled`；`--no-tunnel` 則完全不開。`[secure]` 是加密模式要的套件；只用直連可以省略。
 worker 與用戶端的私鑰放在 `$LLMOP_HOME`（預設 `~/.llmop`），同樣不能外流。
+
+### 啟動後換後端、換模型（不用重啟）
+
+在本機控制台 `http://127.0.0.1:8781/` 的「LLM 後端」區塊：看目前的類型、網址與模型；改類型（ollama／lmstudio／vllm／llamacpp／openai）
+與網址 → 按「列出模型」（LM Studio 會標出哪些已載入）→ 選「沿用目前設定」或挑一個模型 → 按「啟用」。
+它會用保留註解的方式寫進 `config.yaml`，立刻生效，不必重啟。只有本機控制台的管理員登入看得到；外網入口沒有這一區。
+「啟用」只改設定；LM Studio 若沒載入那個模型，要靠它自己的即時載入（第一個請求會比較慢）。
 
 ### 直連模式（明文）
 
@@ -141,6 +159,14 @@ llmop tunnel rotate-api --change-host --grace 600
   `--change-host` 連主機名一起換（只重啟通道 `api`，要有執行中的 `llmop serve`）；`--grace 600` 讓舊連結再通 10 分鐘。
   本機控制台與 `Rotate-API-Link.bat` 做的是同一件事。每次更換都會留稽核紀錄。
 
+### 自動定期更換 API 連結（本機控制台）
+
+在本機控制台（`127.0.0.1:8781`）的「API 連結自動更換」可以自己填更換週期（數字＋小時／天，可填小數，例如 3.5 天；`0` = 關閉）
+和舊連結的寬限期（必須比週期短）。儲存設定後會從現在重新計時，立即生效，不用重啟。
+「延期」可以不斷往後延；「立即更換」馬上換並重新計時。手動、`llmop tunnel rotate-api`、自動更換都會讓計時重來。
+只換秘密路徑：用 quick tunnel 時，主機名在 cloudflared 重啟時仍會變，所以週期只有在具名通道（named tunnel）下才準。
+需要 `llmop serve` 在執行才會自動更換；關機錯過期限，下次啟動後一分鐘內會補換。
+
 ## 讓 SYNOX 使用（在 SYNOX 那一側設定）
 
 本專案不改 SYNOX。以下是擁有者在 SYNOX 設定裡要做的事，三種擇一：
@@ -174,7 +200,7 @@ llmop tunnel rotate-api --change-host --grace 600
 - **Ollama 預設 context 很小**，超過會靜默截斷前面的內容：在 Ollama 那邊設 `OLLAMA_CONTEXT_LENGTH=8192`。LM Studio 回
   「Context size has been exceeded」時，閘道轉成 400 `context_length_exceeded`；完整處理排在 v0.3。
 - **加密模式在 v0.2 不做真串流**（代理送一個完整的 chunk）。
-- **不要把 LLM 伺服器（11434、1234）或本機控制台（8781）對外。** 只用 `llmop serve` 自己開的兩個通道。
+- **不要把 LLM 伺服器（11434、1234，或你的 LM Studio 埠號）或本機控制台（8781）對外。** 只用 `llmop serve` 自己開的兩個通道。
 - **`image_url` 沒有過濾（v0.3 才處理）。** 閘道原樣轉送訊息裡的 `image_url`；如果你的後端（例如 vLLM、部分 LM Studio
   版本）會自己去下載網址，持有 key 的人就能讓後端去連你內網的網址（SSRF）。v0.2 請用不會抓遠端圖片的後端，或只發 key 給信任的人。
 - **VIP 帳號的 API 金鑰只能在本機控制台建立**（AI 預設，R-10）：VIP 沒有或只有很高的用量上限，帳號網站（外網）拒絕 VIP I／II／III 建立 key；一般帳號照常在帳號網站自己建立。

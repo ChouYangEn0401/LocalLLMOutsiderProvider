@@ -195,6 +195,23 @@ def _text_set_first_backend(text: str, values: dict[str, str]) -> str | None:
     return _join_lines(lines, nl, bom)
 
 
+_MODEL_RE = re.compile(r"^(model\s*:\s*)(\"[^\"]*\"|'[^']*'|[^#\s]*)(\s*(?:#.*)?)$")
+
+
+def _text_set_model(text: str, model: str) -> str | None:
+    """Set the top-level ``model:`` line (appended when there is none)."""
+    lines, nl, bom = _split_lines(text)
+    for k, line in enumerate(lines):
+        m = _MODEL_RE.match(line)
+        if m:
+            lines[k] = m.group(1) + _yaml_scalar(model) + m.group(3)
+            return _join_lines(lines, nl, bom)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines += [f"model: {_yaml_scalar(model)}", ""]
+    return _join_lines(lines, nl, bom)
+
+
 def edit_config_text(
     text: str, text_edit: Callable[[str], str | None], raw_edit: Callable[[dict], dict]
 ) -> tuple[str, bool]:
@@ -242,6 +259,29 @@ def _raw_set_first_backend(raw: dict, values: dict[str, str]) -> dict:
     else:
         backends[0].update(values)
     return raw
+
+
+def _raw_set_model(raw: dict, model: str) -> dict:
+    raw["model"] = model
+    return raw
+
+
+def set_llm_backend(text: str, btype: str, base_url: str, model: str | None = None) -> tuple[str, bool]:
+    """Point the first backend at ``btype``/``base_url`` and optionally set the top-level
+    ``model``; comments are kept when possible. Returns ``(new_text, comments_kept)``.
+    The backend's ``name`` follows the type only while it was just the old type's name."""
+    raw = yaml.safe_load(text) or {}
+    first = (raw.get("backends") or [None])[0] if isinstance(raw, dict) else None
+    values = {"type": btype, "base_url": base_url}
+    if isinstance(first, dict) and first.get("name") == first.get("type") and first.get("name"):
+        values = {"name": btype, **values}
+    text, kept = edit_config_text(text, lambda t: _text_set_first_backend(t, values),
+                                  lambda r: _raw_set_first_backend(r, values))
+    if model is not None:
+        text, kept2 = edit_config_text(text, lambda t: _text_set_model(t, model),
+                                       lambda r: _raw_set_model(r, model))
+        kept = kept and kept2
+    return text, kept
 
 
 def _read_text(path: Path) -> str:

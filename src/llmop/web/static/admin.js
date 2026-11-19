@@ -30,6 +30,8 @@
     if (canWrite) {
       bindGuestForm();
       bindWorkerForm();
+      bindLlm();
+      bindRotation();
     }
     await load(false);
     setInterval(() => {
@@ -51,6 +53,7 @@
     renderKeys(o.keys || []);
     LL.limitedTable($('#recent'), o.recent || [], 20, (rows) => LL.requestsTable(rows, true));
     $('#updated').textContent = '更新於 ' + LL.fmtClock(o.server_time);
+    if (canWrite && rotBound) loadRotation().catch(() => {});
     if (canWrite && o.config_editable && !configSha) {
       $('#config-section').classList.remove('hidden');
       bindConfig();
@@ -428,6 +431,166 @@
         err.textContent = e.message;
       }
     });
+  }
+
+  // ---------------------------------------------------------------- LLM backend
+  let llmInfo = null;
+
+  function llmError(msg) { $('#llm-error').textContent = msg || ''; }
+
+  function renderLlmCurrent() {
+    const i = llmInfo;
+    LL.fill($('#llm-current'), kv([
+      ['目前類型', i.type || '—'],
+      ['目前網址', h('span', { class: 'mono' }, i.base_url || '—')],
+      ['目前模型', i.model ? h('span', { class: 'mono' }, i.model) : '（未設定）'],
+    ]));
+  }
+
+  function setModelOptions(models, current) {
+    const sel = $('#llm-model');
+    const opts = [h('option', { value: '' }, '沿用目前設定' + (current ? '（' + current + '）' : ''))];
+    for (const m of models) {
+      const tag = m.loaded === true ? '（已載入）' : m.loaded === false ? '（未載入）' : '';
+      opts.push(h('option', { value: m.id }, m.id + tag));
+    }
+    LL.fill(sel, ...opts);
+  }
+
+  async function loadLlm() {
+    llmInfo = await api('GET', '/ui/api/admin/llm-backend');
+    renderLlmCurrent();
+    const typeSel = $('#llm-type');
+    LL.fill(typeSel, ...llmInfo.types.map((t) => h('option', { value: t }, t)));
+    typeSel.value = llmInfo.type || llmInfo.types[0];
+    $('#llm-url').value = llmInfo.base_url || '';
+    setModelOptions([], llmInfo.model);
+  }
+
+  function bindLlm() {
+    $('#llm-section').classList.remove('hidden');
+    $('#llm-type').addEventListener('change', () => {
+      // Suggest the usual URL for the type, but never overwrite a URL typed by hand
+      // for the type we were already on.
+      const t = $('#llm-type').value;
+      const defaults = (llmInfo && llmInfo.default_urls) || {};
+      const cur = $('#llm-url').value.trim();
+      if (!cur || Object.values(defaults).includes(cur)) $('#llm-url').value = defaults[t] || cur;
+    });
+    $('#llm-form').addEventListener('submit', (ev) => { ev.preventDefault(); $('#llm-list').click(); });
+    $('#llm-list').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      llmError('');
+      btn.disabled = true;
+      try {
+        const q = new URLSearchParams({ type: $('#llm-type').value, base_url: $('#llm-url').value.trim() });
+        const r = await api('GET', '/ui/api/admin/llm-backend/models?' + q.toString());
+        setModelOptions(r.models, r.current_model);
+        LL.toast('找到 ' + r.models.length + ' 個模型');
+      } catch (e) {
+        llmError(e.message);
+      }
+      btn.disabled = false;
+    });
+    $('#llm-apply').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      llmError('');
+      btn.disabled = true;
+      try {
+        const r = await api('POST', '/ui/api/admin/llm-backend', {
+          type: $('#llm-type').value, base_url: $('#llm-url').value.trim(), model: $('#llm-model').value,
+        });
+        llmInfo = r;
+        renderLlmCurrent();
+        setModelOptions([], r.model);
+        LL.toast('已啟用：' + r.type + ' ' + r.base_url + (r.model ? ' · ' + r.model : ''));
+        await load(false);
+        if (configBound) await loadConfig();
+      } catch (e) {
+        llmError(e.message);
+      }
+      btn.disabled = false;
+    });
+    loadLlm().catch((e) => llmError(e.message));
+  }
+
+  // ---------------------------------------------------------------- auto rotation
+  let rotBound = false;
+  let rotInfo = null;
+
+  function rotError(msg) { $('#rot-error').textContent = msg || ''; }
+
+  // seconds -> {value, unit} for the form (days if it divides well, else hours)
+  function splitSeconds(sec) {
+    if (sec >= 86400 && Math.abs(sec / 86400 - Math.round(sec / 86400 * 100) / 100) < 1e-9) {
+      return { value: Math.round(sec / 86400 * 100) / 100, unit: 'days' };
+    }
+    return { value: Math.round(sec / 3600 * 100) / 100, unit: 'hours' };
+  }
+
+  function fmtLeft(sec) {
+    if (sec <= 0) return '已到期，即將更換';
+    const d = Math.floor(sec / 86400), hr = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+    return (d ? d + ' 天 ' : '') + (d || hr ? hr + ' 小時 ' : '') + m + ' 分鐘';
+  }
+
+  function renderRotation() {
+    const i = rotInfo;
+    if (!i) return;
+    const left = i.next_rotation_at ? i.next_rotation_at - Date.now() / 1000 : 0;
+    LL.fill($('#rot-status'), kv([
+      ['目前連結建立於', i.created_at ? h('span', null, LL.fmtDateTime(i.created_at), '（', LL.fmtRel(i.created_at), '）') : '—'],
+      ['下次自動更換', i.enabled && i.next_rotation_at
+        ? h('span', null, LL.fmtDateTime(i.next_rotation_at), '（還有 ', fmtLeft(left), '）')
+        : h('span', { class: 'muted' }, '自動更換已關閉')],
+      ['舊連結有效至', i.old_link_valid_until ? h('span', null, LL.fmtDateTime(i.old_link_valid_until)) : h('span', { class: 'muted' }, '無（舊連結已失效）')],
+    ]));
+  }
+
+  async function loadRotation() {
+    rotInfo = await api('GET', '/ui/api/admin/api-link/rotation');
+    renderRotation();
+  }
+
+  function fillRotForm() {
+    const iv = splitSeconds(rotInfo.interval_seconds || 0), gr = splitSeconds(rotInfo.grace_seconds || 0);
+    $('#rot-interval').value = rotInfo.interval_seconds ? iv.value : 0;
+    $('#rot-unit').value = iv.unit;
+    $('#rot-grace').value = rotInfo.grace_seconds ? gr.value : 0;
+    $('#rot-grace-unit').value = rotInfo.grace_seconds ? gr.unit : 'hours';
+  }
+
+  function bindRotation() {
+    rotBound = true;
+    const run = async (btn, fn) => {
+      rotError('');
+      btn.disabled = true;
+      try { await fn(); } catch (e) { rotError(e.message); }
+      btn.disabled = false;
+    };
+    $('#rot-save').addEventListener('click', (ev) => run(ev.currentTarget, async () => {
+      rotInfo = await api('POST', '/ui/api/admin/api-link/rotation', {
+        interval: parseFloat($('#rot-interval').value || '0'), unit: $('#rot-unit').value,
+        grace: parseFloat($('#rot-grace').value || '0'), grace_unit: $('#rot-grace-unit').value,
+      });
+      renderRotation();
+      LL.toast(rotInfo.enabled ? '已儲存，從現在重新計時' : '已關閉自動更換');
+    }));
+    $('#rot-extend').addEventListener('click', (ev) => run(ev.currentTarget, async () => {
+      rotInfo = await api('POST', '/ui/api/admin/api-link/rotation/extend', {
+        amount: parseFloat($('#rot-ext').value || '0'), unit: $('#rot-ext-unit').value,
+      });
+      renderRotation();
+      LL.toast('已延期');
+    }));
+    $('#rot-now').addEventListener('click', (ev) => run(ev.currentTarget, async () => {
+      if (!confirm('確定要立即更換 API 連結？舊連結會依寬限期設定失效。')) return;
+      await api('POST', '/ui/api/admin/api-link/rotate', { change_host: false, reason: '立即更換（控制台）' });
+      LL.toast('已更換 API 連結，計時已重新開始。別台電腦的 worker 要改 gateway_url。');
+      await load(false);
+      await loadRotation();
+    }));
+    loadRotation().then(fillRotForm).catch((e) => rotError(e.message));
   }
 
   // ---------------------------------------------------------------- raw config
