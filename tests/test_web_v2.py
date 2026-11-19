@@ -665,3 +665,93 @@ def test_static_has_no_cdn_and_no_inline_code():
                      "/ui/api/admin/refill", "/ui/api/admin/api-link/rotate",
                      "/ui/api/admin/config"):
         assert endpoint in admin
+
+
+# =========================================================================== LLM backend panel
+def _fake_lmstudio(monkeypatch, *, down=False):
+    import httpx
+
+    from llmop.backends import probe
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if down:
+            raise httpx.ConnectError("refused")
+        p = request.url.path
+        if p == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m-a"}, {"id": "m-b"}]})
+        if p == "/api/v0/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "m-a", "state": "not-loaded"}, {"id": "m-b", "state": "loaded"},
+                {"id": "emb", "type": "embeddings", "state": "loaded"}]})
+        return httpx.Response(404)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(probe.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+
+def test_llm_backend_list_models(monkeypatch):
+    _fake_lmstudio(monkeypatch)
+    c = make_client(make_state(), "local")
+    login(c, "root")
+    r = c.get("/ui/api/admin/llm-backend/models", params={"type": "lmstudio", "base_url": "http://localhost:1235/v1/"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["base_url"] == "http://localhost:1235"
+    assert [m["id"] for m in body["models"]] == ["m-b", "m-a"]  # loaded first
+    assert body["models"][0]["loaded"] is True and body["models"][1]["loaded"] is False
+    assert BACKEND_SECRET not in r.text
+    info = c.get("/ui/api/admin/llm-backend").json()
+    assert info["type"] == "openai" and "lmstudio" in info["types"]
+
+
+def test_llm_backend_list_errors(monkeypatch):
+    c = make_client(make_state(), "local")
+    login(c, "root")
+    for params in ({}, {"type": "nope", "base_url": "http://x:1"}, {"type": "ollama", "base_url": "ftp://x"},
+                   {"type": "ollama", "base_url": "http://u:p@x:1"}, {"type": "ollama", "base_url": "http://x:1?a=b"}):
+        assert c.get("/ui/api/admin/llm-backend/models", params=params).status_code == 400, params
+    _fake_lmstudio(monkeypatch, down=True)
+    r = c.get("/ui/api/admin/llm-backend/models", params={"type": "lmstudio", "base_url": "http://localhost:1"})
+    assert r.status_code == 502 and "連不上" in r.json()["error"]["message"]
+
+
+def test_llm_backend_not_for_non_admin_or_public(monkeypatch):
+    _fake_lmstudio(monkeypatch)
+    state = make_state()
+    c = make_client(state, "local")
+    login(c, "alice")
+    assert c.get("/ui/api/admin/llm-backend").status_code == 403
+    assert c.get("/ui/api/admin/llm-backend/models", params={"type": "lmstudio", "base_url": "http://a:1"}).status_code == 403
+    pub = make_client(state, "public")
+    login(pub, "root")
+    assert pub.get("/ui/api/admin/llm-backend").status_code == 404
+    assert pub.post("/ui/api/admin/llm-backend", json={}).status_code in (404, 405)
+    assert ("POST", "/ui/api/admin/llm-backend") not in routes_of(build_web_router(state, "public"))
+
+
+def test_llm_backend_set_writes_config(tmp_path):
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    original = (
+        "# operator notes\nmodel: qwen3:8b   # the one model\n"
+        "backends:\n  - name: fake\n    type: openai\n    base_url: http://10.9.8.7:1234  # lan\n"
+        "accounts:\n  root:\n    role: admin\n    tier: vip3\n"
+        f'    password_hash: "{HASHES["root"]}"\n'
+    )
+    path.write_bytes(original.encode("utf-8"))
+    state = make_state(load_config(path))
+    c = make_client(state, "local")
+    h = {"X-CSRF-Token": login(c, "root")}
+    body = {"type": "lmstudio", "base_url": "http://localhost:1235"}
+    assert c.post("/ui/api/admin/llm-backend", json=body).status_code == 403  # CSRF
+    assert c.post("/ui/api/admin/llm-backend", json={"type": "bogus", "base_url": "http://a:1"}, headers=h).status_code == 400
+    r = c.post("/ui/api/admin/llm-backend", json=body, headers=h)  # no model: keep current
+    assert r.status_code == 200, r.text
+    assert state.config.backends[0].type == "lmstudio" and state.config.model == "qwen3:8b"
+    assert state.config.backends[0].base_url == "http://localhost:1235"
+    assert path.read_text(encoding="utf-8").startswith("# operator notes\n")
+    r = c.post("/ui/api/admin/llm-backend", json={**body, "model": "qwen3.5-9b@q6_k"}, headers=h)
+    assert r.status_code == 200 and r.json()["model"] == "qwen3.5-9b@q6_k"
+    assert load_config(path).model == "qwen3.5-9b@q6_k" and state.config.model == "qwen3.5-9b@q6_k"

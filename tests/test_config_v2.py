@@ -348,3 +348,24 @@ def test_configedit_errors_are_config_errors(tmp_path):
         configedit._validate_text("queue: {slots: 0}\n", tmp_path / "config.yaml")
     with pytest.raises(ConfigError, match="top level"):
         configedit.edit_config_text("- a\n", lambda t: None, lambda raw: raw)
+
+
+def test_configedit_set_llm_backend_and_model_keep_comments(tmp_path):
+    text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    new, kept = configedit.set_llm_backend(text, "lmstudio", "http://localhost:1235", "qwen3.5-9b@q6_k")
+    assert kept and "# Tiers." in new and "model: qwen3.5-9b@q6_k" in new
+    cfg = configedit._validate_text(new, tmp_path / "config.yaml")
+    b = cfg.backends[0]
+    assert (b.type, b.name, b.base_url, cfg.model) == ("lmstudio", "lmstudio", "http://localhost:1235",
+                                                       "qwen3.5-9b@q6_k")
+    # model=None leaves the model alone; a model with a slash is quoted
+    again, kept = configedit.set_llm_backend(new, "vllm", "http://127.0.0.1:8000")
+    assert kept and "model: qwen3.5-9b@q6_k" in again
+    again, kept = configedit.set_llm_backend(again, "vllm", "http://127.0.0.1:8000", "qwen/qwen3.8-27b")
+    assert configedit._validate_text(again, tmp_path / "c.yaml").model == "qwen/qwen3.8-27b"
+
+
+def test_configedit_set_model_appends_when_missing():
+    new, kept = configedit.edit_config_text("backends: []\n", lambda t: configedit._text_set_model(t, "m1"),
+                                            lambda r: configedit._raw_set_model(r, "m1"))
+    assert kept and new == "backends: []\nmodel: m1\n"

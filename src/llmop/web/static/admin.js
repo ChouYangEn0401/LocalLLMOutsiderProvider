@@ -30,6 +30,7 @@
     if (canWrite) {
       bindGuestForm();
       bindWorkerForm();
+      bindLlm();
     }
     await load(false);
     setInterval(() => {
@@ -428,6 +429,87 @@
         err.textContent = e.message;
       }
     });
+  }
+
+  // ---------------------------------------------------------------- LLM backend
+  let llmInfo = null;
+
+  function llmError(msg) { $('#llm-error').textContent = msg || ''; }
+
+  function renderLlmCurrent() {
+    const i = llmInfo;
+    LL.fill($('#llm-current'), kv([
+      ['目前類型', i.type || '—'],
+      ['目前網址', h('span', { class: 'mono' }, i.base_url || '—')],
+      ['目前模型', i.model ? h('span', { class: 'mono' }, i.model) : '（未設定）'],
+    ]));
+  }
+
+  function setModelOptions(models, current) {
+    const sel = $('#llm-model');
+    const opts = [h('option', { value: '' }, '沿用目前設定' + (current ? '（' + current + '）' : ''))];
+    for (const m of models) {
+      const tag = m.loaded === true ? '（已載入）' : m.loaded === false ? '（未載入）' : '';
+      opts.push(h('option', { value: m.id }, m.id + tag));
+    }
+    LL.fill(sel, ...opts);
+  }
+
+  async function loadLlm() {
+    llmInfo = await api('GET', '/ui/api/admin/llm-backend');
+    renderLlmCurrent();
+    const typeSel = $('#llm-type');
+    LL.fill(typeSel, ...llmInfo.types.map((t) => h('option', { value: t }, t)));
+    typeSel.value = llmInfo.type || llmInfo.types[0];
+    $('#llm-url').value = llmInfo.base_url || '';
+    setModelOptions([], llmInfo.model);
+  }
+
+  function bindLlm() {
+    $('#llm-section').classList.remove('hidden');
+    $('#llm-type').addEventListener('change', () => {
+      // Suggest the usual URL for the type, but never overwrite a URL typed by hand
+      // for the type we were already on.
+      const t = $('#llm-type').value;
+      const defaults = (llmInfo && llmInfo.default_urls) || {};
+      const cur = $('#llm-url').value.trim();
+      if (!cur || Object.values(defaults).includes(cur)) $('#llm-url').value = defaults[t] || cur;
+    });
+    $('#llm-form').addEventListener('submit', (ev) => { ev.preventDefault(); $('#llm-list').click(); });
+    $('#llm-list').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      llmError('');
+      btn.disabled = true;
+      try {
+        const q = new URLSearchParams({ type: $('#llm-type').value, base_url: $('#llm-url').value.trim() });
+        const r = await api('GET', '/ui/api/admin/llm-backend/models?' + q.toString());
+        setModelOptions(r.models, r.current_model);
+        LL.toast('找到 ' + r.models.length + ' 個模型');
+      } catch (e) {
+        llmError(e.message);
+      }
+      btn.disabled = false;
+    });
+    $('#llm-apply').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      llmError('');
+      btn.disabled = true;
+      try {
+        const r = await api('POST', '/ui/api/admin/llm-backend', {
+          type: $('#llm-type').value, base_url: $('#llm-url').value.trim(), model: $('#llm-model').value,
+        });
+        llmInfo = r;
+        renderLlmCurrent();
+        setModelOptions([], r.model);
+        LL.toast('已啟用：' + r.type + ' ' + r.base_url + (r.model ? ' · ' + r.model : ''));
+        await load(false);
+        if (configBound) await loadConfig();
+      } catch (e) {
+        llmError(e.message);
+      }
+      btn.disabled = false;
+    });
+    loadLlm().catch((e) => llmError(e.message));
   }
 
   // ---------------------------------------------------------------- raw config

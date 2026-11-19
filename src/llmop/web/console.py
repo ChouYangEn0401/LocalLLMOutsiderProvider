@@ -280,3 +280,82 @@ def register_console_routes(
         state.holder.set(cfg)
         log.info("config file edited by admin=%s", user.account.username)
         return JSONResponse({"ok": True, "sha256": _sha(text)})
+
+    # ------------------------------------------------------------------ LLM backend panel
+    def _local_admin(request: Request):
+        """Admin session created on the console itself (reads that make the server call
+        out to an address the admin typed are treated like the raw config read)."""
+        user = require_admin(request)
+        if getattr(user.session, "origin", "") == "remote":
+            raise WebError(403, "請在本機控制台重新登入後再操作 (log in on the local console).",
+                           "local_session_required")
+        return user
+
+    def _backend_state() -> dict:
+        from ..config import BACKEND_TYPES, DEFAULT_URLS
+
+        cfg = state.config
+        first = cfg.backends[0] if cfg.backends else None
+        return {"type": first.type if first else "", "base_url": first.base_url if first else "",
+                "name": first.name if first else "", "model": cfg.model,
+                "types": list(BACKEND_TYPES), "default_urls": dict(DEFAULT_URLS),
+                "editable": cfg.path is not None, "config_error": state.holder.last_error}
+
+    def _probe_args(btype: Any, base_url: Any) -> tuple[str, str]:
+        from ..backends import probe
+
+        try:
+            return probe.check_type(btype), probe.normalize_url(base_url)
+        except probe.ProbeError as exc:
+            raise WebError(400, str(exc), "invalid_value") from None
+
+    @router.get("/ui/api/admin/llm-backend")
+    async def api_admin_llm_backend_get(request: Request):
+        _local_admin(request)
+        return JSONResponse(_backend_state())
+
+    @router.get("/ui/api/admin/llm-backend/models")
+    async def api_admin_llm_backend_models(request: Request):
+        """List the models of the server at ``type`` + ``base_url`` (query string)."""
+        from ..backends import probe
+
+        _local_admin(request)
+        btype, root = _probe_args(request.query_params.get("type"),
+                                  request.query_params.get("base_url"))
+        key = ""
+        first = state.config.backends[0] if state.config.backends else None
+        if first and first.type == btype and first.root_url.rstrip("/") == root:
+            key = first.api_key  # same server as configured: reuse its key, never echo it
+        try:
+            models = await probe.list_models(btype, root, key)
+        except probe.ProbeError as exc:
+            raise WebError(502, str(exc), "backend_unreachable") from None
+        return JSONResponse({"type": btype, "base_url": root, "models": models,
+                             "current_model": state.config.model})
+
+    @router.post("/ui/api/admin/llm-backend")
+    async def api_admin_llm_backend_set(request: Request):
+        """Point the first backend at type + base_url and optionally set ``model``
+        (omitted or empty = keep the current one). Comment-preserving, validated first."""
+        user = mutating_admin(request)
+        from .. import configedit
+        from ..config import ConfigError
+
+        data = await read_json(request)
+        btype, root = _probe_args(data.get("type"), data.get("base_url"))
+        model = _clean_text(data.get("model"), "model", 200) or None
+        path = _config_path()
+        try:
+            current = configedit._read_text(path)
+        except OSError:
+            raise WebError(404, "讀不到設定檔 (config file unreadable).", "no_config_file") from None
+        try:
+            text, kept = configedit.set_llm_backend(current, btype, root, model)
+            cfg = configedit._validate_text(text, path)
+        except ConfigError as exc:
+            raise WebError(400, f"設定有誤，沒有存檔：{exc}", "invalid_config") from None
+        configedit._save_edit(path, text, kept)
+        state.holder.set(cfg)
+        log.info("llm backend set by admin=%s type=%s model=%s", user.account.username, btype,
+                 (model or "(unchanged)")[:80])
+        return JSONResponse({"ok": True, "comments_kept": kept, **_backend_state()})

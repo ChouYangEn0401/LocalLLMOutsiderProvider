@@ -36,6 +36,36 @@
     <div class="card flush"><div class="table-wrap" id="backends"></div></div>
   </section>
 
+  <section class="section write-only hidden" aria-labelledby="h-llm" id="llm-section">
+    <div class="section-head">
+      <h2 id="h-llm">LLM 後端 (LLM backend)</h2>
+      <p class="small muted">改完立即生效，不用重新啟動；會寫進設定檔（保留註解）。</p>
+    </div>
+    <div class="card">
+      <div id="llm-current"></div>
+      <form id="llm-form" class="row-form" method="post" novalidate>
+        <div class="field">
+          <label for="llm-type">類型 (type)</label>
+          <select id="llm-type"></select>
+        </div>
+        <div class="field grow">
+          <label for="llm-url">網址 (base_url)</label>
+          <input id="llm-url" type="text" maxlength="300" autocomplete="off" spellcheck="false"
+                 placeholder="例如 localhost:1234（LM Studio 顯示的埠號）">
+        </div>
+        <button class="btn" id="llm-list" type="button">列出模型</button>
+      </form>
+      <div class="row-form">
+        <div class="field grow">
+          <label for="llm-model">模型 (model)</label>
+          <select id="llm-model"><option value="">沿用目前設定</option></select>
+        </div>
+        <button class="btn primary" id="llm-apply" type="button">啟用</button>
+      </div>
+      <p class="form-error" id="llm-error" role="alert"></p>
+    </div>
+  </section>
+
   <section class="section" aria-labelledby="h-users">
     <div class="section-head">
       <h2 id="h-users">帳號與等級 (Accounts &amp; tiers)</h2>
