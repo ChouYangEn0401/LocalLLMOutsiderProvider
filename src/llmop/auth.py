@@ -111,6 +111,16 @@ def authenticate_api(request: Request, cfg: Config, store: Store) -> ApiCaller:
     return ApiCaller(account=account, key=rec)
 
 
+def key_allows_plaintext(key: ApiKey, account: Account | None = None) -> bool:
+    """May this key be used on the plaintext ``/v1`` path? Keys marked
+    ``encryption: required`` only work through the encrypted relay (``/e2e/v1``).
+    ``account`` is accepted for future per-account policy; a disabled account never
+    gets plaintext access."""
+    if account is not None and account.disabled:
+        return False
+    return getattr(key, "encryption", "optional") != "required"
+
+
 def web_user(request: Request, cfg: Config, store: Store) -> WebUser | None:
     sid = request.cookies.get(SESSION_COOKIE, "")
     if not sid:
