@@ -1,0 +1,15 @@
+{"schema": "verifylist/1",
+ "items": [
+  {"id": "full-test-suite", "what": "All automated tests pass (expected 1282)", "run": ["python", "-m", "pytest", "-q"],
+   "cwd": ".", "env": {}, "expect": "exit 0, 1282 passed", "needs": ["heavy"], "since": "2026-11-19",
+   "status": "pending", "last_run": null, "last_result": null},
+  {"id": "frozen-docs", "what": "Frozen BU_Keep docs unchanged", "run": ["python", "-m", "pytest", "-q", "tests/test_bu_keep.py"],
+   "cwd": ".", "env": {}, "expect": "exit 0", "needs": [], "since": "2026-11-19",
+   "status": "pending", "last_run": null, "last_result": null},
+  {"id": "build-wheel", "what": "Wheel and sdist build", "run": ["python", "-m", "build"],
+   "cwd": ".", "env": {}, "expect": "exit 0, dist/*.whl and *.tar.gz", "needs": ["network"], "since": "2026-11-19",
+   "status": "pending", "last_run": null, "last_result": null},
+  {"id": "docker-compose-v02", "what": "Docker image builds for v0.2 (three listeners, llmop serve)", "run": ["docker", "compose", "-f", "docker/docker-compose.yml", "build"],
+   "cwd": ".", "env": {}, "expect": "exit 0", "needs": ["network", "heavy", "linux"], "since": "2026-11-19",
+   "status": "pending", "last_run": null, "last_result": null}
+ ]}
