@@ -258,7 +258,7 @@ class BackendAdapter:
         message, code, param = parse_upstream_error(text)
         message = message or f"HTTP {status}"
         if status not in (401, 403, 404, 429) and is_context_overflow(message, code):
-            log.warning("backend %s: context overflow (HTTP %s): %s", self.name, status, message)
+            log.warning("backend %s: context overflow (HTTP %s)", self.name, status)  # no text
             return context_error(self.name)
         if status in (401, 403):
             # Not the client's fault: our own backends[].api_key is wrong / missing.

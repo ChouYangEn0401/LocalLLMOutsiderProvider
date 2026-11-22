@@ -7,6 +7,10 @@ import pytest
 
 from llmop import paths
 
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
+
 
 def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
@@ -17,14 +21,15 @@ def test_home_honours_llmop_home(tmp_path, monkeypatch):
     path = paths.home("worker")
     assert path == tmp_path / "state" / "worker"
     assert path.is_dir()
-    assert mode(path) == 0o700
-    assert mode(tmp_path / "state") == 0o700
+    assert not POSIX_MODES or mode(path) == 0o700
+    assert not POSIX_MODES or mode(tmp_path / "state") == 0o700
     assert paths.home("worker") == path  # 第二次呼叫不出錯
 
 
 def test_home_defaults_to_dot_llmop(tmp_path, monkeypatch):
     monkeypatch.delenv("LLMOP_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what expanduser reads on Windows
     assert paths.home("client") == tmp_path / ".llmop" / "client"
 
 
@@ -39,7 +44,7 @@ def test_write_and_read_round_trip(tmp_path):
 def test_secret_write_is_0600(tmp_path):
     target = tmp_path / "keys.json"
     paths.write_json(target, {"k": "v"}, secret=True)
-    assert mode(target) == 0o600
+    assert not POSIX_MODES or mode(target) == 0o600
 
 
 def test_secret_write_replaces_open_file_with_0600(tmp_path):
@@ -47,7 +52,7 @@ def test_secret_write_replaces_open_file_with_0600(tmp_path):
     target.write_text("{}")
     os.chmod(target, 0o644)
     paths.write_json(target, {"token": "x"}, secret=True)
-    assert mode(target) == 0o600
+    assert not POSIX_MODES or mode(target) == 0o600
 
 
 def test_secret_mode_is_set_before_content(tmp_path, monkeypatch):
@@ -67,7 +72,7 @@ def test_secret_mode_is_set_before_content(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths.os, "fdopen", spying_fdopen)
     paths.write_json(tmp_path / "keys.json", {"k": "v"}, secret=True)
-    assert seen and all(m == 0o600 for m in seen)
+    assert seen and (not POSIX_MODES or all(m == 0o600 for m in seen))
 
 
 def test_failed_serialisation_leaves_old_file(tmp_path):

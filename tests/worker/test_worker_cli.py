@@ -13,6 +13,10 @@ from llmop.protocol import b64u_decode
 from llmop.worker import cli
 from llmop.worker.keystore import KeyStoreError, load_keys
 
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
+
 
 def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
@@ -25,8 +29,8 @@ def test_init_on_fresh_home(home, capsys):
     key = store.current_key()
     assert key.key_id in out and key.public_key in out
     assert worker_key_id(b64u_decode(key.public_key)) == key.key_id
-    assert mode(home / "keys.json") == 0o600
-    assert mode(home / "config.json") == 0o600
+    assert not POSIX_MODES or mode(home / "keys.json") == 0o600
+    assert not POSIX_MODES or mode(home / "config.json") == 0o600
     assert json.loads((home / "config.json").read_text())["gateway_url"].endswith("/worker/ws")
 
     # 第二次 init 不會換掉金鑰。
@@ -43,7 +47,7 @@ def test_rotate_show_and_prune(home, capsys):
     store = load_keys(home / "keys.json")
     assert store.current != first
     assert [k.key_id for k in store.ordered()] == [store.current, first]
-    assert mode(home / "keys.json") == 0o600
+    assert not POSIX_MODES or mode(home / "keys.json") == 0o600
 
     capsys.readouterr()
     assert cli.main(["show-key"]) == 0
@@ -53,7 +57,7 @@ def test_rotate_show_and_prune(home, capsys):
     assert cli.main(["prune-keys", "--yes"]) == 0
     pruned = load_keys(home / "keys.json")
     assert [k.key_id for k in pruned.keys] == [store.current]
-    assert mode(home / "keys.json") == 0o600
+    assert not POSIX_MODES or mode(home / "keys.json") == 0o600
     assert cli.main(["prune-keys", "--yes"]) == 0  # 沒有舊金鑰時什麼都不做
 
 

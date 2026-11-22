@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from llmop import crypto, paths
 from llmop.client.config import config_path, load_signing_key, signing_key_info, signing_key_path
 
 from .fakes import API_KEY, PROMPT, REPLY_TEXT, FakeGateway
+
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
 
 SRC = Path(llmop.__file__).resolve().parents[1]
 MODEL = "qwen3:8b"
@@ -76,7 +81,7 @@ async def test_keygen_on_fresh_home(llmop_home):
     public_key, sig_key_id = signing_key_info(load_signing_key())
     assert f"public_key: {public_key}" in out
     assert f"sig_key_id: {sig_key_id}" in out
-    assert stat.S_IMODE(os.stat(signing_key_path()).st_mode) == 0o600
+    assert not POSIX_MODES or stat.S_IMODE(os.stat(signing_key_path()).st_mode) == 0o600
     private_b64u = paths.read_json(signing_key_path())["private_key"]
     assert private_b64u not in out
 
@@ -128,6 +133,9 @@ async def test_proxy(llmop_home, setup):
         env=_env(llmop_home),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # Windows cannot send SIGINT to another process; Ctrl+Break to its own process
+        # group is the console equivalent (it would otherwise keep running after the test).
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
     )
     base = f"http://127.0.0.1:{port}"
     try:
@@ -149,8 +157,12 @@ async def test_proxy(llmop_home, setup):
         assert REPLY_TEXT in text
         assert text.endswith("data: [DONE]\n\n")
     finally:
-        proc.send_signal(signal.SIGINT)
-        out, err = await asyncio.wait_for(proc.communicate(), 30)
+        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), 30)
+        except TimeoutError:
+            proc.kill()  # never leave the proxy (and its port) behind
+            raise
     assert "127.0.0.1" in out.decode()
     logs = err.decode()
     assert "request_id=" in logs

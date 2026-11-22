@@ -22,6 +22,10 @@ from llmop.worker.link import LinkStopped
 
 from .harness import DEFAULT_REPLY, FAKE_USAGE, MODELS, WorkerRunner, parse_sse
 
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
+
 
 def _completion_parts(data: object, stream: bool) -> tuple[dict, str, dict]:
     """從非串流的 chat.completion 或串流的 SSE 文字取出 (助理訊息, finish_reason, usage)。"""
@@ -96,7 +100,7 @@ async def test_worker_registration_and_reconnect_after_restart(make_stack):
     state = stack.worker.state
     assert state["worker_id"] == stack.worker_id
     assert state["worker_token"].startswith("llmop_wk_")
-    assert stat.S_IMODE(os.stat(stack.worker.home / "state.json").st_mode) == 0o600
+    assert not POSIX_MODES or stat.S_IMODE(os.stat(stack.worker.home / "state.json").st_mode) == 0o600
     info = await stack.console.worker(stack.worker_id)
     assert info["online"] is True
     assert info["reg_expires_at"] is None

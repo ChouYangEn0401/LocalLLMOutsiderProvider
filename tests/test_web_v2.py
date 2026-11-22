@@ -586,7 +586,9 @@ def test_raw_config_editing(tmp_path):
 
     path = tmp_path / "config.yaml"
     original = "# operator notes\n" + yaml.safe_dump(raw_config(), sort_keys=False)
-    path.write_text(original, encoding="utf-8")
+    # bytes, not write_text: on Windows text mode would write CRLF, and the console
+    # rightly returns the file exactly as it is on disk.
+    path.write_bytes(original.encode("utf-8"))
     state = make_state(load_config(path))
     c = make_client(state, "local")
     h = {"X-CSRF-Token": login(c, "root")}
@@ -728,6 +730,91 @@ def test_llm_backend_not_for_non_admin_or_public(monkeypatch):
     assert pub.get("/ui/api/admin/llm-backend").status_code == 404
     assert pub.post("/ui/api/admin/llm-backend", json={}).status_code in (404, 405)
     assert ("POST", "/ui/api/admin/llm-backend") not in routes_of(build_web_router(state, "public"))
+
+
+def _fake_loader(monkeypatch, *, status=200, down=False):
+    """Fake Ollama / LM Studio for "載入模型"; returns the list of requests seen."""
+    import httpx
+
+    from llmop.backends import probe
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if down:
+            raise httpx.ConnectError("refused")
+        seen.append(request)
+        p = request.url.path
+        if p == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "m-a"}, {"name": "m-b"}]})
+        if p == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": "m-b", "context_length": 8192}]})
+        if p in ("/api/generate", "/v1/chat/completions"):
+            return httpx.Response(status, json={"done": True})
+        return httpx.Response(404)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(probe.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    return seen
+
+
+def test_llm_backend_load_model(monkeypatch):
+    import json as _json
+
+    seen = _fake_loader(monkeypatch)
+    state = make_state()
+    c = make_client(state, "local")
+    h = {"X-CSRF-Token": login(c, "root")}
+    body = {"type": "ollama", "base_url": "http://localhost:11434", "model": "m-a"}
+    assert c.post("/ui/api/admin/llm-backend/load", json=body).status_code == 403  # CSRF
+    r = c.post("/ui/api/admin/llm-backend/load", json=body, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == "m-a" and r.json()["ok"] is True
+    sent = seen[-1]
+    assert sent.url.path == "/api/generate"
+    assert _json.loads(sent.content) == {"model": "m-a", "prompt": "", "stream": False}
+    # LM Studio: a 1-token request (just-in-time loading)
+    r = c.post("/ui/api/admin/llm-backend/load", headers=h,
+               json={"type": "lmstudio", "base_url": "http://localhost:1234", "model": "m-b"})
+    assert r.status_code == 200 and seen[-1].url.path == "/v1/chat/completions"
+    assert _json.loads(seen[-1].content)["max_tokens"] == 1
+    # vLLM gets its model at start-up: refused with a clear reason, nothing sent
+    n = len(seen)
+    r = c.post("/ui/api/admin/llm-backend/load", headers=h,
+               json={"type": "vllm", "base_url": "http://localhost:8000", "model": "x"})
+    assert r.status_code == 400 and "啟動時" in r.json()["error"]["message"] and len(seen) == n
+    # the config is not changed by loading
+    assert state.config.backends[0].type == "openai"
+
+
+def test_llm_backend_load_errors_and_access(monkeypatch):
+    _fake_loader(monkeypatch, status=404)
+    state = make_state()
+    c = make_client(state, "local")
+    h = {"X-CSRF-Token": login(c, "root")}
+    body = {"type": "ollama", "base_url": "http://localhost:11434", "model": "nope"}
+    r = c.post("/ui/api/admin/llm-backend/load", json=body, headers=h)
+    assert r.status_code == 502 and "沒有這個模型" in r.json()["error"]["message"]
+    monkeypatch.undo()  # restore the real AsyncClient before patching it again
+    _fake_loader(monkeypatch, down=True)
+    r = c.post("/ui/api/admin/llm-backend/load", json=body, headers=h)
+    assert r.status_code == 502 and "連不上" in r.json()["error"]["message"]
+    user = make_client(state, "local")
+    hu = {"X-CSRF-Token": login(user, "alice")}
+    assert user.post("/ui/api/admin/llm-backend/load", json=body, headers=hu).status_code == 403
+    assert ("POST", "/ui/api/admin/llm-backend/load") not in routes_of(build_web_router(state, "public"))
+
+
+def test_llm_backend_list_marks_loaded_ollama_models(monkeypatch):
+    _fake_loader(monkeypatch)
+    c = make_client(make_state(), "local")
+    login(c, "root")
+    r = c.get("/ui/api/admin/llm-backend/models", params={"type": "ollama", "base_url": "http://localhost:11434"})
+    assert r.status_code == 200, r.text
+    models = r.json()["models"]
+    assert [(m["id"], m["loaded"]) for m in models] == [("m-b", True), ("m-a", False)]
+    assert models[0]["context_length"] == 8192
 
 
 def test_llm_backend_set_writes_config(tmp_path):

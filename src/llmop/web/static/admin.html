@@ -102,6 +102,8 @@
           <label for="llm-model">模型 (model)</label>
           <select id="llm-model"><option value="">沿用目前設定</option></select>
         </div>
+        <button class="btn" id="llm-load" type="button"
+                title="請 Ollama／LM Studio 現在就把模型載入記憶體（不改設定檔）">載入模型</button>
         <button class="btn primary" id="llm-apply" type="button">啟用</button>
       </div>
       <p class="form-error" id="llm-error" role="alert"></p>

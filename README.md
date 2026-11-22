@@ -88,9 +88,10 @@ worker 與用戶端的私鑰放在 `$LLMOP_HOME`（預設 `~/.llmop`），同樣
 ### 啟動後換後端、換模型（不用重啟）
 
 在本機控制台 `http://127.0.0.1:8781/` 的「LLM 後端」區塊：看目前的類型、網址與模型；改類型（ollama／lmstudio／vllm／llamacpp／openai）
-與網址 → 按「列出模型」（LM Studio 會標出哪些已載入）→ 選「沿用目前設定」或挑一個模型 → 按「啟用」。
+與網址 → 按「列出模型」（LM Studio、Ollama 會標出哪些已載入）→ 選「沿用目前設定」或挑一個模型 → 按「啟用」。
 它會用保留註解的方式寫進 `config.yaml`，立刻生效，不必重啟。只有本機控制台的管理員登入看得到；外網入口沒有這一區。
-「啟用」只改設定；LM Studio 若沒載入那個模型，要靠它自己的即時載入（第一個請求會比較慢）。
+「啟用」只改設定。按「載入模型」會請 Ollama／LM Studio 現在就把選的模型載入記憶體（大模型可能要幾分鐘；
+不改設定檔）；vLLM、llama.cpp 在啟動時就決定模型，不能從這裡載入。LM Studio 要開著「Just-in-Time model loading」。
 
 ### 直連模式（明文）
 
@@ -218,6 +219,7 @@ API 連結換了會回 `link_changed`（「API 連結已更換，請向服務提
 | `llmop add-user NAME` | 新增帳號；`llmop set-password NAME` 改密碼 |
 | `llmop usage` / `llmop keys` / `llmop revoke-key ID` | 看用量、key，撤銷 key |
 | `llmop tunnel show-api` / `llmop tunnel rotate-api` | 看、更換 API 連結 |
+| `llmop audit exposure` / `llmop audit canary` | 對外公開前的自我檢查：該擋的都擋住、對話內容沒有進資料或紀錄（[docs/CLI.md](docs/CLI.md) 3.12） |
 | `llmop worker init` / `llmop worker run` | 加密模式的 worker |
 | `llmop client keygen` / `llmop client proxy` | 加密模式的用戶端外掛（v0.2 的單一設定檔） |
 | `llmop client enroll` / `add-plain` / `profiles` / `set-link` / `pin` / `self-check` / `revoke` / `forget` | SDK 的設定檔（[docs/SDK.md](docs/SDK.md)） |
@@ -235,7 +237,7 @@ API 連結換了會回 `link_changed`（「API 連結已更換，請向服務提
   版本）會自己去下載網址，持有 key 的人就能讓後端去連你內網的網址（SSRF）。v0.2 請用不會抓遠端圖片的後端，或只發 key 給信任的人。
 - **VIP 帳號的 API 金鑰只能在本機控制台建立**（AI 預設，R-10）：VIP 沒有或只有很高的用量上限，帳號網站（外網）拒絕 VIP I／II／III 建立 key；一般帳號照常在帳號網站自己建立。
 - **更換 API 連結後，別台電腦的 worker 要改設定。** 它們的 `gateway_url` 是 `wss://<API 連結>/worker/ws`；經由舊連結連入的 worker 在舊連結失效時會被切斷（本機的 worker 不受影響）。
-- Docker 與 CI 檔案是 v0.1 時代的，還沒有為 v0.2 更新（[docs/HANDOFF.md](docs/HANDOFF.md)）。
+- Docker 檔案是 v0.1 時代的，還沒有為 v0.2 更新（[docs/HANDOFF.md](docs/HANDOFF.md)）；CI 已改成 Python 3.11／3.12、裝 `[dev,secure]`。
 
 ## 安全邊界
 

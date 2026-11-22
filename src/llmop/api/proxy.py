@@ -77,6 +77,15 @@ def sse_event(obj: Any) -> bytes:
     return b"data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n\n"
 
 
+def backend_detail(exc: BackendError) -> str:
+    """What the log and the usage record keep of a backend error: status, code, backend
+    name and the length of the backend's text - never the text itself (it may quote the
+    conversation). The backend's own log has the wording when it is needed."""
+    return (f"HTTP {exc.status} {exc.code or 'backend_error'}"
+            f"{' from ' + exc.backend if exc.backend else ''}, {len(exc.message or '')} chars of "
+            "backend text not stored")
+
+
 def model_permitted(account: Account, cfg: Config, requested: str, backend: str, upstream: str) -> bool:
     """May ``account`` use ``requested`` (routed to ``upstream`` on ``backend``)?
 
@@ -95,8 +104,9 @@ def client_error(exc: BackendError, sanitize: bool, request_id: str = "") -> Api
     (and its name) only goes to the log; status, code and param are kept."""
     if not sanitize or exc.code == "context_length_exceeded":
         return ApiError.from_backend(exc)
-    log.warning("backend error (request %s): HTTP %s %s: %s",
-                request_id, exc.status, exc.code, exc.message)
+    # Not the wording itself: a backend may quote the request (e.g. a validation error
+    # that echoes the messages), and logs must never hold conversation text.
+    log.warning("backend error (request %s): %s", request_id, backend_detail(exc))
     if exc.status < 500 and exc.status not in _GENERIC_ERRORS:
         message = _GENERIC_REJECTED
     else:
@@ -126,7 +136,7 @@ def _body_error(adapter: BackendAdapter, obj: Any) -> BackendError:
     """An error object the backend sent inside a 200 response / stream event."""
     message, code, _ = error_fields(obj) or ("unknown error", None, None)
     if is_context_overflow(message, code):
-        log.warning("backend %s: context overflow: %s", adapter.name, message)
+        log.warning("backend %s: context overflow", adapter.name)
         return context_error(adapter.name)
     return BackendError(502, f"Backend '{adapter.name}' error: {message}",
                         code=code or "backend_error", backend=adapter.name)
@@ -270,7 +280,7 @@ class _Call:
         if isinstance(exc, (QueueFull, QueueTimeout)):
             return queue_error(exc)
         if isinstance(exc, BackendError):
-            self.detail = exc.message
+            self.detail = backend_detail(exc)  # usage record: never the backend's wording
             return client_error(exc, self.sanitize, self.request_id)
         return None
 
@@ -609,8 +619,8 @@ class _StreamRelay:
         if self.open_task.done():
             exc = self.open_task.exception()
             if exc is not None:
+                err = self.call.api_error(exc)  # first: sets call.detail (no backend text)
                 await self.close("error", getattr(exc, "message", "") or repr(exc))
-                err = self.call.api_error(exc)
                 if err is not None:
                     raise err
                 raise exc

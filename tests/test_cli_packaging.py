@@ -107,7 +107,9 @@ def test_ci_workflow_matrix():
     data = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
     matrix = data["jobs"]["test"]["strategy"]["matrix"]
     assert set(matrix["os"]) == {"ubuntu-latest", "windows-latest"}
-    assert set(matrix["python"]) == {"3.10", "3.12"}
+    assert set(matrix["python"]) == {"3.11", "3.12"}  # pyproject: requires-python >= 3.11
+    install = " ".join(s.get("run", "") for s in data["jobs"]["test"]["steps"])
+    assert ".[dev,secure]" in install
     assert "pull_request" in _on(data)
 
 

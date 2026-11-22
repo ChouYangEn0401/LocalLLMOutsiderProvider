@@ -195,7 +195,9 @@ def test_quota_unlimited_admin():
 
 def test_quota_rpm_and_concurrency():
     cfg = make_cfg(requests_per_minute=2, max_concurrent=1)
-    t = [1000.0]
+    # A real-looking clock: Windows' localtime() rejects timestamps near the epoch
+    # (OSError 22 in quota.day_start), which a running server never sees.
+    t = [1_700_000_000.0]
     qm = QuotaManager(Store(":memory:"), clock=lambda: t[0])
     a = cfg.accounts["alice"]
     l1 = qm.acquire(a)

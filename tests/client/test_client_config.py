@@ -20,6 +20,10 @@ from llmop.protocol import b64u_encode
 
 from .fakes import API_KEY
 
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
+
 PINNED = b64u_encode(crypto.public_raw(crypto.generate_worker_key()))
 
 
@@ -94,7 +98,7 @@ def test_load_config_from_home():
 def test_signing_key_created_once_with_mode_0600():
     key, created = ensure_signing_key()
     assert created
-    assert stat.S_IMODE(os.stat(signing_key_path()).st_mode) == 0o600
+    assert not POSIX_MODES or stat.S_IMODE(os.stat(signing_key_path()).st_mode) == 0o600
     again, created_again = ensure_signing_key()
     assert not created_again
     assert signing_key_info(again) == signing_key_info(key)

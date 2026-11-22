@@ -573,7 +573,8 @@ class Store:
         if username is not None:
             sql += " WHERE username = ?"
             params = (username,)
-        sql += " ORDER BY ts DESC LIMIT ?"
+        # id breaks ties: Windows' clock can give two quick requests the same ts.
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
         params += (int(limit),)
         return [dict(r) for r in self._all(sql, params)]
 
