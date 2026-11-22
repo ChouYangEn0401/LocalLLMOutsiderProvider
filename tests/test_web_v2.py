@@ -34,7 +34,7 @@ from llmop.web.routes import CSP, STATIC_DIR
 
 PASSWORDS = {"alice": "alice-pass-123", "bob": "bob-pass-456", "root": "root-pass-789"}
 HASHES = {u: security.hash_password(p, n=2**10) for u, p in PASSWORDS.items()}
-BACKEND_SECRET = "sk-backend-SECRET-0123456789"
+BACKEND_SECRET = "sk-backend-SECRET-0123456789"  # prepublish-check: allow (fake data for the leak test)
 TUNNEL_SECRET = "tunnel-token-SECRET-abcdef"
 LOCAL_URL = "http://127.0.0.1:8781"
 SIG = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode()
@@ -81,7 +81,7 @@ class FakeRouter:
 class FakeTunnel:
     url = "https://ui-host.trycloudflare.com"
     status = "connected"
-    last_error = "stderr: /home/owner/secret/path"
+    last_error = "stderr: /home/owner/secret/path"  # prepublish-check: allow (fake data for the leak test)
 
 
 class FakeApiLink:
@@ -379,7 +379,7 @@ def test_key_encryption_and_signing_key():
 # =========================================================================== masking + secrets
 def test_public_admin_overview_is_masked():
     state = make_state(tunnel=FakeTunnel(), api_link=FakeApiLink(), scheduler=Scheduler())
-    state.holder.last_error = "C:/Users/owner/config.yaml: line 3"
+    state.holder.last_error = "C:/Users/owner/config.yaml: line 3"  # prepublish-check: allow (fake data for the leak test)
     _, rec = state.store.create_api_key("alice", "laptop", sig_public_key=SIG)
     state.store.record_usage(UsageEvent(username="alice", endpoint="chat.completions",
                                         model="m", backend="fake", prompt_tokens=3,
@@ -393,7 +393,7 @@ def test_public_admin_overview_is_masked():
     assert r.status_code == 200
     o = r.json()
     text = r.text
-    for leak in ("10.9.8.7", "198.51.100.77", "Users/owner", "/home/owner", "gate-AAAA",
+    for leak in ("10.9.8.7", "198.51.100.77", "Users/owner", "/home/owner", "gate-AAAA",  # prepublish-check: allow (fake data for the leak test)
                  "PUBKEY-xyz", SIG, "api-host"):
         assert leak not in text, leak
     assert o["config_path"] is None and o["config_error"]
