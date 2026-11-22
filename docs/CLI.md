@@ -371,7 +371,8 @@ llmop tunnel --cloudflared "C:\Tools\cloudflared.exe"
 
 ## 4. 加密模式指令（需要 `secure` 額外套件）
 
-沒有安裝 `secure` 套件時，`llmop worker ...` / `llmop client ...` 會印出一行安裝提示（`pip install "localllm-outsider-provider[secure]"`）而不是錯誤堆疊。
+沒有安裝 `secure` 套件時，`llmop worker ...` / `llmop client keygen|proxy|chat|models` 會印出一行安裝提示（`pip install "localllm-outsider-provider[secure]"`）而不是錯誤堆疊。
+`llmop client` 的 SDK 子指令（4.2 的第二張表）只需要 `[sdk]`。v0.3 起節點指令（`serve`、`init`…）需要 `[server]`，沒裝會印 `pip install "localllm-outsider-provider[server]"`。
 這兩組指令的狀態都放在 `$LLMOP_HOME`（見第 5 節），**包含私鑰與 API 金鑰，不可外流或放進雲端同步資料夾**。
 
 ### 4.1 `llmop worker`
@@ -413,6 +414,20 @@ llmop client models
 llmop client chat --model qwen3.5:9b "請用一句話介紹你自己"
 llmop client proxy
 ```
+
+**SDK 的設定檔子指令**（v0.3，只需要 `[sdk]`；每個設定檔在 `$LLMOP_HOME\client\<名稱>\`；`--profile` 預設 `default`；
+密碼與 key 一律在終端機提示輸入、不收命令列參數）。說明見 [SDK.md](SDK.md)。
+
+| 子指令 | 用途與注意 |
+|---|---|
+| `enroll --account-url URL --user NAME [--fingerprint FP] [--profile P] [--encryption required\|optional] [--api-link URL] [--key-name N] [--expires-days N] [--replace-key-id ID] [--test]` | 用帳號密碼建 key：本機產生簽章金鑰、只上傳公鑰、核對並釘選 worker 指紋。指紋對不上就停、不釘選 |
+| `add-plain --api-link URL [--profile P] [--max-tokens N]` | 只有一把 key（例如 GUEST key）：建明文設定檔 |
+| `profiles` | 列出設定檔（API 連結只顯示主機） |
+| `set-link [--profile P] [--no-check] URL` | API 連結換了：換成服務提供者給的新連結 |
+| `pin --fingerprint FP [--profile P]` / `unpin KEY_ID [--profile P]` | 核對並釘選／取消釘選 worker 公鑰 |
+| `self-check [--profile P] [--fix]` | 檔案權限、連結、key、明文與沒簽章的請求是否被拒；有 FAIL 以代碼 1 結束 |
+| `revoke [--profile P]` | 在伺服器撤銷這個設定檔的 key（要密碼） |
+| `forget [--profile P] [--yes]` | 刪掉本機設定檔與簽章私鑰（不撤銷伺服器上的 key） |
 
 ### 4.3 用戶端 `config.json` 範例
 
@@ -476,4 +491,5 @@ llmop client proxy
 - **`llmop check` 連不上 LM Studio**：埠號不對。以 LM Studio 畫面為準，重新 `llmop init --force --backend-type lmstudio --backend-url http://localhost:<埠號> --model <名稱>`，或直接編輯 `config.yaml` 的 `backends`。
 - **`init` 說檔案已存在**：加 `--force`（會留 `.bak`），或改用 `set-password` 改密碼。
 - **加密模式報 `needs the secure extra`**：`pip install "localllm-outsider-provider[secure]"`。
+- **`llmop serve` 報 `needs the server extra`**（v0.3 起）：`pip install "localllm-outsider-provider[server,secure]"`。
 - **API 連結外流**：立刻 `llmop tunnel rotate-api`，並通知使用者與遠端 worker 更新連結。
