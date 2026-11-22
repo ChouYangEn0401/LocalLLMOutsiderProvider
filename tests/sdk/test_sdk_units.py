@@ -246,3 +246,15 @@ def test_import_does_not_load_server_packages():
             "bad = {'fastapi', 'uvicorn', 'aiohttp', 'starlette', 'yaml'} & set(sys.modules); "
             "assert not bad, bad")
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_api_link_trailing_v1_is_dropped(tmp_path):
+    """OpenAI-style tools write the link as .../<secret path>/v1; the SDK adds /v1/... itself."""
+    from llmop.sdk import profiles as store
+    assert store.check_api_link("https://api.example.test/gate-xyz/v1") == "https://api.example.test/gate-xyz"
+    assert store.check_api_link("https://api.example.test/gate-xyz/v1/") == "https://api.example.test/gate-xyz"
+    assert store.check_api_link("https://api.example.test/gate-xyz") == "https://api.example.test/gate-xyz"
+    prof = add_plain("https://api.example.test/gate-xyz/v1", "sk-llop-" + "x" * 32, profile="v1", home=tmp_path)
+    assert prof.api_link == "https://api.example.test/gate-xyz"
+    set_link("https://api.example.test/gate-new/v1", profile="v1", home=tmp_path)
+    assert Client.from_profile("v1", home=tmp_path).profile.api_link == "https://api.example.test/gate-new"

@@ -143,7 +143,7 @@ def _load_build_portable():
 def test_version_is_0_3_0_dev_everywhere():
     import llmop
 
-    assert llmop.__version__ == "0.3.0a1"
+    assert llmop.__version__ == "0.3.0a2"
     py = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "llmop.gateway" not in py  # the B gateway package was removed in v0.2
     assert 'secure = ["cryptography' in py and "aiohttp" in py and "websockets" in py

@@ -520,7 +520,7 @@ class Client:
     def set_link(self, url: str, *, check: bool = True) -> bool | None:
         """換成新的 API 連結（向服務提供者拿的）。check=True 時先打 <連結>/health 試一次：
         回 True（通）／False（不通，仍然存下）；check=False 回 None。"""
-        link = store.check_url(url, "API 連結")
+        link = store.check_api_link(url)
         self._profile = store.update(self._profile, api_link=link)
         return self.link_ok() if check else None
 
@@ -711,7 +711,7 @@ def enroll(account_url: str, username: str, password: str, *, worker_fingerprint
                                  username=username, encryption=encryption, status="incomplete",
                                  transport="auto")
         if api_link:
-            prof = replace(prof, api_link=store.check_url(api_link, "API 連結"))
+            prof = replace(prof, api_link=store.check_api_link(api_link))
         store.ensure_dir(prof.directory)
         sig_public = sig_key_id = ""
         created = False
@@ -726,7 +726,7 @@ def enroll(account_url: str, username: str, password: str, *, worker_fingerprint
                 link = ((account.portal().get("api_link") or {}).get("url")) or ""
                 if not link:
                     raise SdkError("bad_request", "帳號網站沒有提供 API 連結；請用 --api-link 指定（向服務提供者拿）")
-                prof = replace(prof, api_link=store.check_url(link, "API 連結"))
+                prof = replace(prof, api_link=store.check_api_link(link))
             if replace_key_id:
                 account.delete_key(replace_key_id)
             made = account.create_key(name=key_name or f"llmop-sdk-{profile}", encryption=encryption,
@@ -762,7 +762,7 @@ def add_plain(api_link: str, api_key: str, *, profile: str = "default", max_toke
               home: str | Path | None = None) -> Profile:
     """只有一把 key（例如服務提供者發的 GUEST key）：建一個走明文的設定檔。不連網。"""
     _require_new(profile, home, False)
-    prof = store.new_profile(profile, home=home, api_link=store.check_url(api_link, "API 連結"),
+    prof = store.new_profile(profile, home=home, api_link=store.check_api_link(api_link),
                              api_key=store.check_api_key(api_key), transport="plain", status="ready",
                              default_max_tokens=max_tokens or store.DEFAULT_MAX_TOKENS)
     return store.save(prof)
@@ -770,7 +770,7 @@ def add_plain(api_link: str, api_key: str, *, profile: str = "default", max_toke
 
 def set_link(url: str, *, profile: str = "default", home: str | Path | None = None) -> None:
     """不建 Client、直接換某個設定檔的 API 連結（不試連）。"""
-    store.update(store.load(profile, home=home), api_link=store.check_url(url, "API 連結"))
+    store.update(store.load(profile, home=home), api_link=store.check_api_link(url))
 
 
 # ---------------------------------------------------------------------------

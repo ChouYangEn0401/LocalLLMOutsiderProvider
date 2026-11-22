@@ -80,6 +80,17 @@ def check_url(url: str, what: str = "網址") -> str:
     raise SdkError("bad_request", f"{what}必須是 https://（只有連到本機 127.0.0.1 時才可以用 http://）")
 
 
+def check_api_link(url: str, what: str = "API 連結") -> str:
+    """API 連結：check_url ＋ 去掉結尾的 /v1。OpenAI 相容工具習慣把連結寫成 `…/<秘密路徑>/v1`，
+    SDK 自己會接 /v1/…；不去掉的話會變成 /v1/v1/models（真機實測踩到）。"""
+    link = check_url(url, what)
+    while link.lower().endswith("/v1"):
+        link = link[:-3].rstrip("/")
+    if not urlsplit(link).hostname:
+        raise SdkError("bad_request", f"{what}格式不正確")
+    return link
+
+
 def check_api_key(key: str) -> str:
     key = (key or "").strip()
     if not key.startswith(API_KEY_PREFIXES) or len(key) > 512 or any(c.isspace() for c in key):
