@@ -12,6 +12,7 @@
     llmop tunnel                   only the tunnel, for a server that already runs
     llmop tunnel rotate-api        new secret API link (--change-host: new host too)
     llmop tunnel show-api          print the current API link
+    llmop audit exposure|canary    nothing reachable that should not be; no plaintext in data/logs
     llmop gateway run | init       aliases of serve | init
 
 The global ``--config PATH`` (default: ``$LLMOP_CONFIG`` or ``config.yaml``) may be
@@ -1175,6 +1176,38 @@ def cmd_revoke_key(args) -> int:
     return 0
 
 
+def _audit_http():
+    import httpx
+
+    from .audit import HTTP_TIMEOUT
+
+    # trust_env=False: loopback checks must never be sent through a proxy / VPN client.
+    return httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False, trust_env=False)
+
+
+def cmd_audit(args) -> int:
+    """``llmop audit exposure|canary`` (see llmop.audit). Exit 0 = no FAIL line."""
+    from . import audit
+
+    cfg = _load(args)
+    store = _open_store(cfg)
+    try:
+        with _audit_http() as http:
+            if args.action == "canary":
+                if store is None:
+                    raise CliError(f"no database in {cfg.data_path} yet: start llmop serve first", 2)
+                report = audit.canary(cfg, store, http=http, scan=[Path(p) for p in args.scan],
+                                      fingerprint=args.fingerprint or "", timeout=args.timeout)
+            else:
+                report = audit.exposure(cfg, store, http=http, public=args.public,
+                                        with_key=args.with_key)
+    finally:
+        if store is not None:
+            store.close()
+    _out(report.to_json() if args.json else report.render())
+    return 0 if report.ok else 1
+
+
 # ---------------------------------------------------------------- parser
 EPILOG = """\
 first time:
@@ -1271,6 +1304,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("revoke-key", cmd_revoke_key, "revoke an API key by its id (see: llmop keys)")
     sp.add_argument("key_id", metavar="ID")
+
+    sp = add("audit", cmd_audit, "check that nothing is reachable that should not be "
+             "(exposure) and that conversations never land in data or logs (canary)")
+    sp.add_argument("action", choices=("exposure", "canary"),
+                    help="exposure: ports, tunnels, probes without credentials; "
+                         "canary: send one encrypted test request and search data/logs for it")
+    sp.add_argument("--public", action="store_true",
+                    help="exposure: also probe through the tunnel URLs (needs internet)")
+    sp.add_argument("--with-key", action="store_true",
+                    help="exposure: create a temporary encryption-only GUEST key, test it, revoke it")
+    sp.add_argument("--scan", action="append", default=[], metavar="PATH",
+                    help="canary: also search this log file / folder (repeatable)")
+    sp.add_argument("--fingerprint", metavar="KEY_ID",
+                    help="canary: worker key_id to encrypt for (default: this computer's worker)")
+    sp.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS",
+                    help="canary: how long to wait for the answer (default 120)")
+    sp.add_argument("--json", action="store_true", help="print the result as JSON")
     return p
 
 
