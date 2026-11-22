@@ -135,6 +135,7 @@ llmop client proxy             :: 在 127.0.0.1:8788 啟動 OpenAI 相容代理�
 | `llmop usage` | 各帳號 token 用量 |
 | `llmop keys` | 列出 API 金鑰 |
 | `llmop revoke-key` | 以 ID 撤銷 API 金鑰 |
+| `llmop audit exposure` / `audit canary` | 檢查有沒有不該對外的入口；對話內容有沒有落在資料或紀錄 |
 | `llmop gateway run` / `gateway init` | `serve` / `init` 的別名 |
 | `llmop worker init` | 建立 worker 金鑰與設定範本（加密模式） |
 | `llmop worker show-key` | 印出目前與仍接受的 worker 金鑰 |
@@ -366,6 +367,32 @@ llmop tunnel --cloudflared "C:\Tools\cloudflared.exe"
 
 **用途**：舊稱的別名。`gateway run` 等同 `serve`，`gateway init` 等同 `init`，其後的參數原樣轉交。
 `llmop gateway` 不帶或帶其他動作會印出用法。
+
+### 3.12 `llmop audit`
+
+**用途**：在跑 `llmop serve` 的那台電腦上，自己檢查「外面用不到不該用的東西」。全部通過才把 API 連結交給別人。
+結束代碼：沒有 FAIL 是 `0`，有 FAIL 是 `1`；`--json` 印成 JSON。
+
+`llmop audit exposure [--public] [--with-key] [--json]`
+
+| 檢查 | 預期 |
+|---|---|
+| 三個入口（8781／8780／8782）在這台電腦的區網 IP 上 | 連不上（只試連，不開埠、不送資料） |
+| LLM 伺服器的埠（11434、1234、設定裡本機後端的埠）在區網 IP 上 | 連不上；連得上是 WARN（例如 LM Studio 開了「在區網提供服務」） |
+| 通道的目標 | 只有帳號網站與 API 入口，絕不是本機控制台或 LLM 伺服器 |
+| 不帶憑證打公開入口（127.0.0.1；加 `--public` 也經通道網址） | 根路徑、錯的秘密路徑 404；`/v1` 沒 key 或假 key 401；`/e2e/v1` 送垃圾 4xx；帳號網站的管理端點拒絕 |
+| `--with-key`：臨時發一把「必須加密」的 GUEST key（10 分鐘自動到期） | 走明文 `/v1` 403 `encryption_required`；不是這把 key 的簽章 403；撤銷後 401。做完一定撤銷 |
+
+`llmop audit canary [--scan PATH ...] [--fingerprint KEY_ID] [--timeout 秒] [--json]`
+
+經跑著的節點送一筆**加密**請求，內容含一段隨機測試字串（臨時 GUEST key，做完撤銷），再到資料夾
+（`server.data_dir`）、`$LLMOP_HOME` 與每個 `--scan` 路徑（例如存下來的紀錄檔）找這段字串：應該找不到。
+需要這台電腦有 worker（`llmop worker init`、`roles: [gateway, worker]`），或用 `--fingerprint` 指定線上 worker 的 key_id。
+模型伺服器自己（LM Studio、Ollama）的紀錄不在檢查範圍：跑模型的那台本來就必須解開內容。
+
+**範例**：`llmop audit exposure --with-key`、`llmop audit exposure --public`、`llmop audit canary --scan serve.log`
+
+**注意**：`--with-key` 與 `canary` 會在資料庫寫入一把臨時 key 並撤銷它（`llmop keys --all` 看得到，名稱 `llmop-audit (temporary)`）。
 
 ---
 
