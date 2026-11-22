@@ -17,7 +17,7 @@ v0.2 是兩個原型的合併：A（v0.1 的閘道：帳號、額度、網頁、
 |---|---|---|
 | 是什麼 | `llmop serve`：三個入口＋兩個通道＋（可選）worker，一個程式 | `llmop client`：SDK、本機代理 `127.0.0.1:8788`、`keygen`／`chat`／`models` |
 | 誰裝 | 有 GPU 的那台電腦的主人 | 只有使用**加密** key 的人 |
-| 怎麼裝 | Windows 免安裝版 zip，或 `pip install "<whl>[secure]"` | `pip install "<whl>[secure]"`，或同一個免安裝版的 `Start-Client-Proxy.bat` |
+| 怎麼裝 | Windows 免安裝版 zip，或 `pip install "<whl>[server,secure]"`（v0.3 起要 `[server]`） | `pip install "<whl>[secure]"`，或同一個免安裝版的 `Start-Client-Proxy.bat`；給別的程式用的 SDK 只要 `[sdk]`（[SDK.md](SDK.md)） |
 
 直連（明文）的使用者什麼都不用裝：API 連結＋`sk-llop-` key＋任何 OpenAI 相容工具。
 

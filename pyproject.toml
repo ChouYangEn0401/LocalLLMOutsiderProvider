@@ -11,12 +11,9 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "ChouYangEn0401" }]
+# 基本相依只有 httpx。伺服器（llmop serve）裝 [server]，別的程式只想用 SDK 裝 [sdk]。
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn>=0.27",
     "httpx>=0.27",
-    "PyYAML>=6.0",
-    "tzdata; sys_platform == \"win32\"",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -26,8 +23,15 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "PyYAML>=6.0",
+    "tzdata; sys_platform == \"win32\"",
+]
+sdk = ["httpx>=0.27", "cryptography>=47"]
 secure = ["cryptography>=47", "aiohttp>=3.9", "websockets>=12"]
-dev = ["pytest>=8", "respx>=0.21", "build>=1.0", "pytest-aiohttp", "pytest-asyncio", "pyhpke"]
+dev = ["localllm-outsider-provider[server]", "pytest>=8", "respx>=0.21", "build>=1.0", "pytest-aiohttp", "pytest-asyncio", "pyhpke"]
 
 [project.scripts]
 llmop = "llmop.__main__:main"

@@ -138,13 +138,14 @@ def _load_build_portable():
     return mod
 
 
-def test_version_is_0_2_0_everywhere():
+def test_version_is_0_3_0_dev_everywhere():
     import llmop
 
-    assert llmop.__version__ == "0.2.0"
+    assert llmop.__version__ == "0.3.0.dev0"
     py = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert "llmop.gateway" not in py  # the B gateway package was removed in v0.2
     assert 'secure = ["cryptography' in py and "aiohttp" in py and "websockets" in py
+    assert 'sdk = ["httpx' in py and "server = [" in py  # 0.3: 伺服器相依在 [server]，SDK 只要 [sdk]
     assert 'llmop = ["web/static/*", "examples/*"]' in py
 
 
@@ -195,7 +196,7 @@ def test_build_portable_pins_python_and_bundles_secure():
     assert {"cryptography", "aiohttp", "websockets", "tzdata"} <= set(mod.REQUIRED)
     assert "tzdata" in mod.WINDOWS_ONLY
     src = (ROOT / "scripts" / "build_portable.py").read_text(encoding="utf-8")
-    assert '[secure]"' in src
+    assert '[server,secure]"' in src
     names = {p.name for p in PORTABLE.glob("*.bat")}
     assert set(PORTABLE_BATS) <= names
 

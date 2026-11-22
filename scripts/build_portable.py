@@ -172,15 +172,15 @@ def main(argv: list[str] | None = None) -> int:
             log("archive has no python/python.exe - wrong file?")
             return 1
 
-        # 2. llmop[secure] + dependencies as Windows wheels, unpacked into site-packages
+        # 2. llmop[server,secure] + dependencies as Windows wheels, unpacked into site-packages
         site = py_dir / "Lib" / "site-packages"
         site.mkdir(parents=True, exist_ok=True)
-        log("installing llmop[secure] + dependencies (win_amd64 wheels)")
+        log("installing llmop[server,secure] + dependencies (win_amd64 wheels)")
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--quiet", "--no-compile",
              "--disable-pip-version-check", "--target", str(site), "--platform", "win_amd64",
              "--python-version", PY_VERSION, "--implementation", "cp",
-             "--only-binary=:all:", "--upgrade", f"{wheel.resolve()}[secure]", *WINDOWS_ONLY],
+             "--only-binary=:all:", "--upgrade", f"{wheel.resolve()}[server,secure]", *WINDOWS_ONLY],
             check=True,
         )
         # pip --target writes Linux-style console scripts; the .bat files use "python -m llmop".

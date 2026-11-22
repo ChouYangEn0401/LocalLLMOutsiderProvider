@@ -42,7 +42,7 @@ RUN apt-get update \
  && chown 10001:10001 /data
 
 COPY --from=build /dist/*.whl /tmp/
-RUN pip install /tmp/*.whl && rm -f /tmp/*.whl
+RUN for w in /tmp/*.whl; do pip install "${w}[server]"; done && rm -f /tmp/*.whl
 
 USER 10001:10001
 WORKDIR /data

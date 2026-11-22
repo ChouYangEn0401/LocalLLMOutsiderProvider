@@ -6,7 +6,8 @@ Dispatch only:
   ``secure`` extra is missing they print a one-line install hint instead of a traceback.
 * ``gateway run`` / ``gateway init`` are aliases of ``serve`` / ``init`` (the v0.1
   encrypted gateway is now part of the node).
-* anything else goes to the node CLI (``llmop.cli:main``).
+* anything else goes to the node CLI (``llmop.cli:main``); without the ``server`` extra
+  (fastapi, uvicorn, PyYAML) it prints a one-line install hint.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ ROLES = ("gateway", "worker", "client")
 SECURE_ROLES = ("worker", "client")
 SECURE_DEPS = ("cryptography", "aiohttp", "websockets", "yarl", "multidict")
 INSTALL_HINT = 'pip install "localllm-outsider-provider[secure]"'
+SERVER_DEPS = ("fastapi", "uvicorn", "starlette", "pydantic", "yaml")
+SERVER_HINT = 'pip install "localllm-outsider-provider[server]"'
 GATEWAY_ALIASES = {"run": "serve", "init": "init"}
 GATEWAY_USAGE = (
     "usage: llmop gateway {run,init} [options]\n"
@@ -28,6 +31,23 @@ GATEWAY_USAGE = (
 
 def _missing_secure(exc: ModuleNotFoundError) -> bool:
     return (exc.name or "").split(".")[0] in SECURE_DEPS
+
+
+def _missing_server(exc: ModuleNotFoundError) -> bool:
+    return (exc.name or "").split(".")[0] in SERVER_DEPS
+
+
+def _node(args: list[str]) -> int:
+    """The node CLI (serve, init, ...): needs the ``server`` extra since v0.3."""
+    try:
+        from .cli import main as direct_main
+    except ModuleNotFoundError as exc:
+        if not _missing_server(exc):
+            raise
+        print(f"llmop {args[0] if args else ''} needs the server extra: {SERVER_HINT}".replace("  ", " "),
+              file=sys.stderr)
+        return 2
+    return direct_main(args)
 
 
 def _gateway(args: list[str]) -> int:
@@ -51,7 +71,13 @@ def _gateway(args: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
     if args and args[0] == "gateway":
-        return _gateway(args[1:])
+        try:
+            return _gateway(args[1:])
+        except ModuleNotFoundError as exc:
+            if not _missing_server(exc):
+                raise
+            print(f"llmop gateway needs the server extra: {SERVER_HINT}", file=sys.stderr)
+            return 2
     if args and args[0] in SECURE_ROLES:
         role = args[0]
         module_name = f"llmop.{role}.cli"
@@ -68,9 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"「{role}」角色尚未安裝（找不到 {module_name}）。", file=sys.stderr)
             return 2
 
-    from .cli import main as direct_main
-
-    return direct_main(args)
+    return _node(args)
 
 
 if __name__ == "__main__":

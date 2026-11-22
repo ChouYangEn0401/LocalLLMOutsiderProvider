@@ -10,6 +10,8 @@
 1. **伺服器**（`llmop serve`）：閘道＋網頁＋（可選）worker，跑在有 GPU 的那台電腦上。
 2. **用戶端外掛**（`llmop client`）：只有**加密模式**才需要，裝在使用者的電腦上。直連（明文）模式的使用者什麼都不用裝，
    用任何 OpenAI 相容工具即可。
+3. **SDK**（`llmop.sdk`，v0.3 起）：給別的程式用，處理通道、API key 與加解密，只要 `[sdk]`（httpx＋cryptography）。
+   見下面「給別的程式用（SDK）」與 [docs/SDK.md](docs/SDK.md)。
 
 > 這是給少數人用的小型服務，不是商業級服務。v0.2 還沒在真的 Windows／真的 LLM／真的 cloudflared 上實測過，見
 > [docs/HANDOFF.md](docs/HANDOFF.md)。
@@ -60,7 +62,7 @@
 ### 已經有 Python（3.11 以上）
 
 ```bash
-pip install "localllm_outsider_provider-0.2.0-py3-none-any.whl[secure]"
+pip install "localllm_outsider_provider-<版本>-py3-none-any.whl[server,secure]"
 ```
 
 ```bash
@@ -79,7 +81,8 @@ llmop init --backend-type lmstudio --backend-url http://localhost:1234 --model <
 
 LM Studio 的埠號以 LM Studio 自己顯示的為準（預設 1234，也可能是別的，例如 1235），所以 `--backend-url` 要照實填；
 不填會用預設值，之後 `llmop check` 連不上就是埠號不對。不加 `--tunnel` 時，通道依
-`tunnels.ui.enabled`／`tunnels.api.enabled`；`--no-tunnel` 則完全不開。`[secure]` 是加密模式要的套件；只用直連可以省略。
+`tunnels.ui.enabled`／`tunnels.api.enabled`；`--no-tunnel` 則完全不開。`[server]` 是伺服器本體（v0.3 起要明寫）；
+`[secure]` 是加密模式要的套件，只用直連可以省略。
 worker 與用戶端的私鑰放在 `$LLMOP_HOME`（預設 `~/.llmop`），同樣不能外流。
 
 ### 啟動後換後端、換模型（不用重啟）
@@ -167,6 +170,32 @@ llmop tunnel rotate-api --change-host --grace 600
 只換秘密路徑：用 quick tunnel 時，主機名在 cloudflared 重啟時仍會變，所以週期只有在具名通道（named tunnel）下才準。
 需要 `llmop serve` 在執行才會自動更換；關機錯過期限，下次啟動後一分鐘內會補換。
 
+## 給別的程式用（SDK）
+
+別的程式（例如 agent、聊天工具）要用這台伺服器時，裝 SDK 就好，不用裝伺服器的套件：
+
+```bash
+pip install "localllm-outsider-provider[sdk]"
+```
+
+使用者先在自己的電腦用終端機建一個設定檔（密碼、key 都是提示輸入）：
+
+- 有帳號：`llmop client enroll --account-url https://<帳號網站> --user <帳號> --fingerprint <worker 指紋> --profile home`
+  ——在本機產生金鑰對、只上傳公鑰、建一把「必須加密」的 key、核對並釘選 worker 指紋。
+- 只有一把 key（GUEST）：`llmop client add-plain --profile tiny --api-link https://<api 主機>/<秘密路徑>`。
+
+程式裡：
+
+```python
+from llmop.sdk import Client
+with Client.from_profile("home") as client:
+    print(client.chat({"messages": [{"role": "user", "content": "你好"}]})["choices"][0]["message"]["content"])
+```
+
+錯誤一律是 `SdkError`，`kind_hint` 分成 quota／auth／rate／link_changed／offline／timeout／trust／bad_request／server／unknown。
+API 連結換了會回 `link_changed`（「API 連結已更換，請向服務提供者拿新連結」），拿到新連結後
+`llmop client set-link --profile home <新連結>`。完整說明與公開介面：[docs/SDK.md](docs/SDK.md)。
+
 ## 讓 SYNOX 使用（在 SYNOX 那一側設定）
 
 本專案不改 SYNOX。以下是擁有者在 SYNOX 設定裡要做的事，三種擇一：
@@ -190,7 +219,8 @@ llmop tunnel rotate-api --change-host --grace 600
 | `llmop usage` / `llmop keys` / `llmop revoke-key ID` | 看用量、key，撤銷 key |
 | `llmop tunnel show-api` / `llmop tunnel rotate-api` | 看、更換 API 連結 |
 | `llmop worker init` / `llmop worker run` | 加密模式的 worker |
-| `llmop client keygen` / `llmop client proxy` | 加密模式的用戶端外掛 |
+| `llmop client keygen` / `llmop client proxy` | 加密模式的用戶端外掛（v0.2 的單一設定檔） |
+| `llmop client enroll` / `add-plain` / `profiles` / `set-link` / `pin` / `self-check` / `revoke` / `forget` | SDK 的設定檔（[docs/SDK.md](docs/SDK.md)） |
 
 全域選項 `-c PATH` 指定設定檔（預設 `$LLMOP_CONFIG` 或 `config.yaml`）。範例設定見 [config.example.yaml](config.example.yaml)。
 
