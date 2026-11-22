@@ -442,7 +442,10 @@ def test_stream_upstream_error_event(api, fake_net):
     assert events[-1]["error"]["message"] == "Backend 'ollama' error: out of memory"
     assert "[DONE]" not in events
     [row] = api.usage()
-    assert row["status"] == "error" and "out of memory" in row["error"]
+    # The usage record keeps status / code / backend, never the backend's wording
+    # (it may quote the conversation); the client of the v0.1 app still sees it above.
+    assert row["status"] == "error" and "out of memory" not in row["error"]
+    assert row["error"].startswith("HTTP 502 backend_error from ollama")
 
 
 def test_stream_upstream_404_gets_http_status(api, fake_net):

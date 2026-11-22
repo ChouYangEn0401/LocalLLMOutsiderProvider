@@ -385,30 +385,51 @@ def test_context_overflow_in_stream(st, fake_net):
     assert resp.json()["error"]["code"] == "context_length_exceeded"
 
 
-def test_backend_error_details_only_in_log(st, fake_net, caplog):
+def test_backend_error_details_neither_in_response_nor_in_log(st, fake_net, caplog):
+    """The backend's wording stays out of the response (public zone), the log and the
+    usage record: it may quote the conversation. Status, code and backend are kept."""
     state = st()
     key, _ = state.store.create_api_key("alice", "k")
     fake_net.ollama.fail = (500, "llama runner process has terminated: secret path /x/y")
-    with caplog.at_level(logging.WARNING, logger="llmop.api"):
+    with caplog.at_level(logging.DEBUG):
         resp = run(call(state, "public", "POST", "/v1/chat/completions", key=key,
                         json_body=CHAT))
     assert resp.status_code == 502
     assert "llama runner" not in resp.text and "ollama" not in resp.text
-    assert "llama runner" in caplog.text
+    assert "llama runner" not in caplog.text
+    assert "backend error" in caplog.text and "HTTP 502" in caplog.text
     [row] = state.store.recent_usage(None)
-    assert "llama runner" in row["error"]
+    assert "llama runner" not in row["error"]
+    assert row["error"].startswith("HTTP 502") and "ollama" in row["error"]
+
+
+def test_backend_error_quoting_the_prompt_never_reaches_log_or_db(st, fake_net, caplog):
+    """vLLM-style validation errors echo the input; plain /v1 must not write it anywhere."""
+    state = st()
+    key, _ = state.store.create_api_key("alice", "k")
+    marker = "PROMPT-MARKER-7c1f"
+    fake_net.ollama.fail = (400, {"object": "error", "message": f"invalid input: '{marker}'"})
+    body = {"model": CHAT["model"], "messages": [{"role": "user", "content": marker}]}
+    with caplog.at_level(logging.DEBUG):
+        run(call(state, "public", "POST", "/v1/chat/completions", key=key, json_body=body))
+        run(call(state, "local", "POST", "/v1/chat/completions",
+                 json_body={**body, "stream": True}))
+    assert marker not in caplog.text
+    assert all(marker not in str(r) for r in state.store.recent_usage(None))
 
 
 def test_backend_error_hidden_in_stream_event(st, fake_net, caplog):
     state = st()
     fake_net.ollama.mid_stream_error = True
-    with caplog.at_level(logging.WARNING, logger="llmop.api"):
+    with caplog.at_level(logging.DEBUG):
         resp = run(call(state, "local", "POST", "/v1/chat/completions",
                         json_body={**CHAT, "stream": True}))
     events = sse_data(resp.text)
     err = events[-1]["error"]
     assert "out of memory" not in resp.text and err["code"] == "backend_error"
-    assert "out of memory" in caplog.text
+    assert "out of memory" not in caplog.text
+    [row] = state.store.recent_usage(None)
+    assert "out of memory" not in row["error"] and row["error"].startswith("HTTP ")
 
 
 def test_context_overflow_also_without_zone(st, fake_net):
