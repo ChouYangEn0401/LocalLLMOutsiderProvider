@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0.dev0（開發中）
+## 0.3.0a1（2026-11-23，預發布）
 
 ### 新增
 - **用戶端 SDK `llmop.sdk`**（[docs/SDK.md](docs/SDK.md)）：同步 `Client`＋`AsyncClient`、多個設定檔
