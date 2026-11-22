@@ -27,7 +27,10 @@ classifiers = [
 
 [project.optional-dependencies]
 secure = ["cryptography>=47", "aiohttp>=3.9", "websockets>=12"]
-dev = ["pytest>=8", "respx>=0.21", "build>=1.0", "pytest-aiohttp", "pytest-asyncio", "pyhpke"]
+# [dev] alone is enough to run every test: it pulls in [secure] (cryptography, aiohttp,
+# websockets), which the encrypted-relay tests import.
+dev = ["localllm-outsider-provider[secure]", "pytest>=8", "respx>=0.21", "build>=1.0",
+       "pytest-aiohttp>=1.0", "pytest-asyncio>=0.23", "pyhpke"]
 
 [project.scripts]
 llmop = "llmop.__main__:main"

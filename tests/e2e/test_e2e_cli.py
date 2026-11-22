@@ -11,6 +11,7 @@ import asyncio
 import os
 import re
 import signal
+import subprocess
 import sys
 
 import aiohttp
@@ -52,9 +53,14 @@ async def test_llmop_serve_subprocess_end_to_end(llmop_home, tmp_path, aiohttp_s
     paths.write_json(worker_home / "config.json", wcfg, secret=True)
 
     env = {**os.environ, "LLMOP_HOME": str(llmop_home), "PYTHONUNBUFFERED": "1"}
+    # Windows has no SIGTERM for another process (send_signal(SIGTERM) = TerminateProcess,
+    # a hard kill). Closing the console window sends CTRL_BREAK / SIGBREAK, which the node
+    # handles like SIGTERM; it needs its own process group to receive it.
+    windows = os.name == "nt"
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "llmop", "-c", str(config_path), "serve", "--no-tunnel", "--worker",
         env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0,
     )
     output = bytearray()
 
@@ -125,7 +131,7 @@ async def test_llmop_serve_subprocess_end_to_end(llmop_home, tmp_path, aiohttp_s
         await portal.close()
         await http.close()
         if proc.returncode is None:
-            proc.send_signal(signal.SIGTERM)
+            proc.send_signal(signal.CTRL_BREAK_EVENT if windows else signal.SIGTERM)
         try:
             code = await asyncio.wait_for(proc.wait(), 30)
         except TimeoutError:

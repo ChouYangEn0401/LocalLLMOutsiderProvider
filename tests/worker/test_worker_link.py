@@ -15,6 +15,10 @@ from llmop.worker.config import parse_config
 from llmop.worker.keystore import load_state, rotate, save_keys
 from llmop.worker.link import LinkStopped, serve
 
+# Windows has no POSIX permission bits (os.chmod only toggles read-only), so the
+# 0600 / 0700 checks only run on POSIX; the rest of each test runs everywhere.
+POSIX_MODES = os.name != "nt"
+
 
 def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
@@ -40,8 +44,8 @@ async def test_register_then_hello_on_first_run_and_hello_only_later(home, keyst
 
     state = load_state(home / "state.json")
     assert (state.worker_id, state.worker_token) == (gateway.worker_id, gateway.worker_token)
-    assert mode(home / "state.json") == 0o600
-    assert mode(home / "keys.json") == 0o600
+    assert not POSIX_MODES or mode(home / "state.json") == 0o600
+    assert not POSIX_MODES or mode(home / "keys.json") == 0o600
 
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)

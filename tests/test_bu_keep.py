@@ -11,7 +11,10 @@ def test_frozen_files_unchanged():
     for digest, name in rows:
         path = DOCS / name.strip().lstrip("*")
         assert path.exists(), f"frozen file deleted or renamed: {path.name}"
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, f"frozen file modified: {path.name}"
+        # Hash the repository bytes (LF): a Windows checkout with core.autocrlf turns the
+        # text files into CRLF without changing their content.
+        data = path.read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(data).hexdigest() == digest, f"frozen file modified: {path.name}"
 
 
 def test_every_bu_keep_file_is_listed():

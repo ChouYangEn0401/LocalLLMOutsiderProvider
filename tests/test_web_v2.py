@@ -586,7 +586,9 @@ def test_raw_config_editing(tmp_path):
 
     path = tmp_path / "config.yaml"
     original = "# operator notes\n" + yaml.safe_dump(raw_config(), sort_keys=False)
-    path.write_text(original, encoding="utf-8")
+    # bytes, not write_text: on Windows text mode would write CRLF, and the console
+    # rightly returns the file exactly as it is on disk.
+    path.write_bytes(original.encode("utf-8"))
     state = make_state(load_config(path))
     c = make_client(state, "local")
     h = {"X-CSRF-Token": login(c, "root")}
