@@ -68,7 +68,18 @@ def _gateway(args: list[str]) -> int:
     return direct_main([command, *args[1:]])
 
 
+def _safe_console() -> None:
+    """A console that cannot show a character (e.g. cp1252 and Chinese text) prints a replacement instead
+    of crashing the command."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _safe_console()
     args = sys.argv[1:] if argv is None else list(argv)
     if args and args[0] == "gateway":
         try:

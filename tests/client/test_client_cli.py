@@ -29,7 +29,7 @@ MODEL = "qwen3:8b"
 
 
 def _env(home: Path) -> dict:
-    return {**os.environ, "LLMOP_HOME": str(home), "PYTHONPATH": str(SRC)}
+    return {**os.environ, "LLMOP_HOME": str(home), "PYTHONPATH": str(SRC), "PYTHONIOENCODING": "utf-8"}
 
 
 async def run_cli(home: Path, *args: str) -> tuple[int, str, str]:
@@ -44,7 +44,7 @@ async def run_cli(home: Path, *args: str) -> tuple[int, str, str]:
         stderr=asyncio.subprocess.PIPE,
     )
     out, err = await asyncio.wait_for(proc.communicate(), 60)
-    return proc.returncode, out.decode(), err.decode()
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
 def free_port() -> int:
