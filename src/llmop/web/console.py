@@ -389,6 +389,28 @@ def register_console_routes(
         return JSONResponse({"type": btype, "base_url": root, "models": models,
                              "current_model": state.config.model})
 
+    @router.post("/ui/api/admin/llm-backend/load")
+    async def api_admin_llm_backend_load(request: Request):
+        """Load ``model`` on the server at ``type`` + ``base_url`` now (Ollama, LM Studio);
+        does not change the config (use "啟用" for that)."""
+        from ..backends import probe
+
+        user = mutating_admin(request)
+        data = await read_json(request)
+        btype, root = _probe_args(data.get("type"), data.get("base_url"))
+        model = data.get("model") or state.config.model
+        key = ""
+        first = state.config.backends[0] if state.config.backends else None
+        if first and first.type == btype and first.root_url.rstrip("/") == root:
+            key = first.api_key  # same server as configured: reuse its key, never echo it
+        try:
+            result = await probe.load_model(btype, root, model, key)
+        except probe.ProbeError as exc:
+            raise WebError(exc.status, str(exc), "load_failed") from None
+        log.info("llm model loaded by admin=%s type=%s model=%s seconds=%s",
+                 user.account.username, btype, result["model"][:80], result["seconds"])
+        return JSONResponse({"ok": True, "type": btype, "base_url": root, **result})
+
     @router.post("/ui/api/admin/llm-backend")
     async def api_admin_llm_backend_set(request: Request):
         """Point the first backend at type + base_url and optionally set ``model``

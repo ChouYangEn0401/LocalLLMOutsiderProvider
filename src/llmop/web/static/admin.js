@@ -492,6 +492,25 @@
       }
       btn.disabled = false;
     });
+    $('#llm-load').addEventListener('click', async (ev) => {
+      // Ollama / LM Studio load the model into memory now (can take minutes).
+      const btn = ev.currentTarget;
+      llmError('');
+      btn.disabled = true;
+      const label = btn.textContent;
+      btn.textContent = '載入中…';
+      try {
+        const r = await api('POST', '/ui/api/admin/llm-backend/load', {
+          type: $('#llm-type').value, base_url: $('#llm-url').value.trim(), model: $('#llm-model').value,
+        });
+        LL.toast('已載入：' + r.model + '（' + r.seconds + ' 秒）');
+        $('#llm-list').click();
+      } catch (e) {
+        llmError(e.message);
+      }
+      btn.textContent = label;
+      btn.disabled = false;
+    });
     $('#llm-apply').addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       llmError('');
