@@ -23,3 +23,7 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# MVP pipeline inbox: files stay local, folder kept
+/_inbox/*
+!/_inbox/.gitkeep
