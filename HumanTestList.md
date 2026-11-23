@@ -10,6 +10,7 @@
 - [ ] 2026-11-23 · 本機控制台「載入模型」按鈕（Ollama、LM Studio 各一次）· 管理員登入 →「LLM 後端」→ 列出模型 → 選未載入的 →「載入模型」· 出現「已載入：…（N 秒）」，再列一次時標「已載入」；vLLM 顯示「啟動時就決定模型」
 - [ ] 2026-11-23 · `llmop audit` 在真的通道上 · 有模型的那台跑 `llmop audit exposure --public --with-key` 與 `llmop audit canary --scan serve.log` · 最後一行都是 `OK`；測試 key 都已撤銷、serve.log 刪掉
 - [ ] 2026-11-23 · `llmop serve` 啟動畫面只印遮罩版 API 連結（0.3.0a4）· 有模型的那台 `llmop serve --tunnel 2>&1 | Tee-Object serve.log`，等 API 通道出現網址；另一個視窗 `llmop tunnel show-api`，把主機名後面那段秘密路徑在 serve.log 裡搜尋（`Select-String -SimpleMatch`）· 畫面上 API link 是 `https://<主機>/xxx…/v1`、下一行 `Full link : llmop tunnel show-api`、沒有本機 `/v1` 那行；秘密路徑在 serve.log 找不到；測完刪 serve.log
+- [ ] 2026-11-23 · 新手教學能照著走完 · 找一台新電腦，照 docs/TUTORIAL.md 從頭走一遍（A 段免安裝版與 Python 版各一次、B 段明文與加密各一次），記下畫面跟教學寫的不一樣的地方 · 每一步「會看到什麼」都對得上；對不上的記下實際畫面（遮掉 key、密碼、秘密路徑）交回改教學；特別看 A8 啟動畫面各行出現的順序、A5 winget 第一次問條款的樣子
 
 ## 測過了
 

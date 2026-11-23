@@ -1,5 +1,7 @@
 # LocalLLMOutsiderProvider（`llmop`）v0.2
 
+第一次用？看 [docs/TUTORIAL.md](docs/TUTORIAL.md)
+
 把自己電腦上的 **Ollama / LM Studio / vLLM / llama.cpp** 分享給少數親友，透過 **Cloudflare 通道**對外，前面加上
 **帳號、API key、等級與用量、排隊**。API 跟 OpenAI 相容。只有**一個模型**：請求裡的 `model` 一律換成 `config.yaml` 設定的那一個。
 
@@ -177,8 +179,10 @@ llmop tunnel rotate-api --change-host --grace 600
 別的程式（例如 agent、聊天工具）要用這台伺服器時，裝 SDK 就好，不用裝伺服器的套件：
 
 ```bash
-pip install "localllm-outsider-provider[sdk]"
+pip install "localllm-outsider-provider[sdk] @ https://github.com/ChouYangEn0401/LocalLLMOutsiderProvider/releases/download/v0.3.0a4/localllm_outsider_provider-0.3.0a4-py3-none-any.whl"
 ```
+
+這個套件不在 PyPI 上，所以一定要寫 GitHub Release 的 wheel 網址（只寫套件名會裝不到）。
 
 使用者先在自己的電腦用終端機建一個設定檔（密碼、key 都是提示輸入）：
 
