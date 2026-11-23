@@ -56,7 +56,8 @@ quick tunnel（不加 `--tunnel` 時依 `tunnels.ui.enabled`／`tunnels.api.enab
 
 - 本機控制台：`http://127.0.0.1:8781/`（只有這台電腦，以 admin 登入）。
 - 帳號網站：通道 `ui` 的 `https://<ui 主機>`。
-- API 連結：通道 `api` 的 `https://<api 主機>/<秘密路徑>`；`llmop tunnel show-api` 也會印出。
+- API 連結：通道 `api` 的 `https://<api 主機>/<秘密路徑>`。`llmop serve` 的啟動畫面只印遮罩版（`https://<api 主機>/k7Q…/v1`），
+  完整連結用 `llmop tunnel show-api` 看，或在本機控制台看。
 
 由 `llmop serve` 自己啟動的通道只會指向 `127.0.0.1:8780` 與 `127.0.0.1:8782`。
 
