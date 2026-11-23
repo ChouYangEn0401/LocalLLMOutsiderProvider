@@ -51,8 +51,9 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 2. **打什麼**：不用打指令。用瀏覽器打開
    <https://github.com/ChouYangEn0401/LocalLLMOutsiderProvider/releases/tag/v0.3.0a4>，
    下載 `llmop-0.3.0a4-windows-x64-portable.zip`。在下載的檔案上按右鍵 →「解壓縮全部」，解到一個你找得到的地方（例如「文件」）。
-   打開解出來的 `llmop-0.3.0a4` 資料夾，**雙擊 `Command-Prompt.bat`**。之後 A 段所有 `llmop` 指令都在這個視窗裡打。
-3. **會看到什麼**：一個黑色視窗，上面寫：
+   解出來有**兩層資料夾**：先打開 `llmop-0.3.0a4-windows-x64-portable`，再打開裡面的 `llmop-0.3.0a4`（看得到 `Start.bat`、`Command-Prompt.bat` 的那一層）。
+   **雙擊 `Command-Prompt.bat`**。
+3. **會看到什麼**：一個黑色視窗。**這個視窗是「命令提示字元」（cmd），不是 PowerShell。** 上面寫：
 
    ```
    Type commands like:  llmop usage    llmop keys    llmop tunnel show-api    llmop --help
@@ -66,9 +67,12 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 
 4. **不是這樣怎麼辦**：
    - 出現 `[X] python\python.exe is missing. Unzip the whole folder again.`：沒有整個解壓縮。重新「解壓縮全部」，不要直接在 zip 裡面點兩下。
+   - 找不到 `Command-Prompt.bat`：你還在外面那一層，再往裡進一層。
    - **注意**：這個資料夾裡之後會出現 `data` 資料夾，裡面有資料庫和**私鑰**。不要分享、不要上傳、不要放進雲端同步資料夾。
 
 #### 乙、Python 版（已經有 Python 3.11 以上）
+
+還沒裝 Python 的話，先照 [步驟 B1](#步驟-b1打開-powershell確認-python) 的方法裝好再回來。
 
 1. **做什麼**：在 PowerShell 裡建一個資料夾與虛擬環境（**虛擬環境**＝獨立的 Python 小房間），安裝伺服器。
 2. **打什麼**：按 Windows 鍵，打 `PowerShell`，按 Enter。然後一次一行：
@@ -115,19 +119,26 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
    - **以後每次重開 PowerShell**，都要先 `cd $HOME\llmop-server`，再打 `.\.venv\Scripts\Activate.ps1`。
    - `config.yaml` 與 `data` 資料夾會建在這個資料夾；加密用的私鑰在 `$HOME\.llmop`。都不要分享。
 
+#### 之後的指令打在哪裡
+
+- **免安裝版**：打在 `Command-Prompt.bat` 開的黑色視窗（cmd）。
+- **Python 版**：打在啟用了虛擬環境（前面有 `(.venv)`）的 PowerShell。
+- A 段的指令大多兩種視窗都能打。只能在 PowerShell 打的（例如用到 `$HOME` 的）會寫「Python 版（PowerShell）」；只給免安裝版用的會寫「免安裝版（cmd）」。
+  免安裝版的使用者遇到要在 PowerShell 打的指令，請另外開一個 PowerShell。
+
 ### 步驟 A2：打開模型
 
 1. **做什麼**：讓 LM Studio 或 Ollama 在這台電腦上跑起模型。
 2. **打什麼**：
    - **LM Studio**：打開 LM Studio，載入一個模型，到開發者（Developer）分頁打開本機伺服器。**記下畫面上顯示的網址與埠號**（預設 `1234`，但可能是別的數字），以及模型名稱。
      **不要**打開「在區網提供服務」那類選項。
-   - **Ollama**：在 PowerShell 打（模型名稱可以換成你要的）：
+   - **Ollama**：在指令視窗打（模型名稱可以換成你要的）：
 
-     ```powershell
+     ```
      ollama pull qwen3.5:9b
      ```
 
-     ```powershell
+     ```
      ollama list
      ```
 
@@ -141,13 +152,13 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 
    LM Studio：
 
-   ```powershell
+   ```
    llmop init --backend-type lmstudio --backend-url http://127.0.0.1:1234 --model example-model
    ```
 
    Ollama：
 
-   ```powershell
+   ```
    llmop init --backend-type ollama --model qwen3.5:9b
    ```
 
@@ -180,7 +191,7 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 1. **做什麼**：確認 `llmop` 找得到你的模型。這一步只讀，不改任何東西。
 2. **打什麼**：
 
-   ```powershell
+   ```
    llmop check
    ```
 
@@ -198,6 +209,7 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 4. **不是這樣怎麼辦**：
    - 看到 `[X]  lmstudio (lmstudio) http://127.0.0.1:1234  NOT reachable: Backend 'lmstudio' is not reachable (is the LM Studio server running?).`：
      LM Studio 的伺服器沒開，或埠號不對。對照 LM Studio 畫面上的埠號，重新 `llmop init --force --backend-type lmstudio --backend-url http://127.0.0.1:<埠號> --model <名稱>`。
+     `--force` 會**要你重設 admin 密碼**（一樣問兩次），舊的設定檔留成 `config.yaml.bak`；之前用 `add-user` 建的帳號不會搬到新檔，要重建。
    - `has no models yet (Ollama: ollama pull <model>)`：Ollama 還沒有模型，回到步驟 A2。
 
 ### 步驟 A5：安裝 cloudflared（開通道用）
@@ -205,21 +217,29 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 1. **做什麼**：裝 Cloudflare 的 `cloudflared`，它負責開兩條通道。用免費的「快速通道」不需要 Cloudflare 帳號。
 2. **打什麼**：
 
-   ```powershell
+   ```
    winget install --id Cloudflare.cloudflared
    ```
 
+   第一次用 winget 時，它可能會用英文問你是否同意條款（結尾是 `[Y] Yes  [N] No`），**打 `Y` 按 Enter**。
 3. **會看到什麼**：winget 安裝完成。**關掉視窗重開**（Python 版要重新 `cd` 和啟用虛擬環境；免安裝版重新雙擊 `Command-Prompt.bat`），再打 `llmop check`，
    中間那一行 `Tunnel: … cloudflared:` 後面會是 cloudflared 的位置，而不是 `NOT FOUND`。
-4. **不是這樣怎麼辦**：`winget` 無法辨識：免安裝版可以直接雙擊 `Start-With-Tunnel.bat`，它會問你要不要裝；或到 Cloudflare 官網下載 `cloudflared.exe`，放在免安裝版資料夾裡（跟 `Start.bat` 同一層）。
+4. **不是這樣怎麼辦**：`winget` 無法辨識（你的 Windows 沒有 winget）：到 Cloudflare 官網下載 Windows 版的 `cloudflared.exe`，
+   **免安裝版**把它放進看得到 `Start.bat` 的那一層資料夾（`llmop` 會先找那裡）。
 
 ### 步驟 A6：幫朋友建帳號，並限制他能用的模型
 
 1. **做什麼**：替朋友 `alice` 建帳號，讓程式產生一個隨機密碼，並限制她只能用 `example-model`。
-2. **打什麼**：
+2. **打什麼**（`example-model` **換成你在步驟 A3 填的模型名稱**）：
 
-   ```powershell
+   ```
    llmop add-user alice --generate --models example-model
+   ```
+
+   用 Ollama 的話，例如：
+
+   ```
+   llmop add-user alice --generate --models qwen3.5:9b
    ```
 
 3. **會看到什麼**：
@@ -247,36 +267,80 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 2. **打什麼**：
    - 先打開設定檔：
 
-     ```powershell
+     ```
      notepad config.yaml
      ```
 
      找到 `roles: [gateway]` 這一行，改成 `roles: [gateway, worker]`，存檔，關掉記事本。
    - 建立 worker 金鑰：
 
-     ```powershell
+     ```
      llmop worker init
      ```
 
-   - **用 LM Studio 的人**還要改 worker 的設定，讓它找到 LM Studio。打開設定檔（Python 版打第一行，免安裝版打第二行）：
+   - **用 LM Studio 的人**還要改 worker 的設定，讓它找到 LM Studio（用 Ollama 的人不用改，預設就是 Ollama）。打開設定檔：
+
+     Python 版（PowerShell）：
 
      ```powershell
      notepad $HOME\.llmop\worker\config.json
      ```
 
+     免安裝版（cmd）：
+
      ```bat
      notepad data\llmop_home\worker\config.json
      ```
 
-     把 `"backends"` 那一行改成下面這樣（`1234` 換成 LM Studio 的埠號），存檔：
+     `llmop worker init` 寫出來的檔案，`"backends"` 佔好幾行。找到從 `"backends": [` 開始、到對應的 `],` 結束的**整段**：
+
+     改之前：
 
      ```json
-     "backends": [{"kind": "openai", "base_url": "http://127.0.0.1:1234"}],
+       "backends": [
+         {
+           "kind": "ollama",
+           "base_url": "http://127.0.0.1:11434"
+         }
+       ],
      ```
+
+     把這整段換成下面這段（`1234` 換成 LM Studio 的埠號；`kind` 寫 `openai` 是因為 LM Studio 走 OpenAI 相容的介面）：
+
+     改之後：
+
+     ```json
+       "backends": [
+         {
+           "kind": "openai",
+           "base_url": "http://127.0.0.1:1234"
+         }
+       ],
+     ```
+
+     其他行（`gateway_url`、`expose_models`…）都不要動。改完的整個檔案應該長這樣：
+
+     ```json
+     {
+       "gateway_url": "ws://127.0.0.1:8781/worker/ws",
+       "backends": [
+         {
+           "kind": "openai",
+           "base_url": "http://127.0.0.1:1234"
+         }
+       ],
+       "expose_models": [],
+       "max_concurrency": 2,
+       "request_timeout": 1800,
+       "pinned_clients": []
+     }
+     ```
+
+     存檔（Ctrl+S），關掉記事本。
 
    - 看指紋：
 
-     ```powershell
+     ```
      llmop worker show-key
      ```
 
@@ -301,13 +365,16 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
    - `llmop worker needs the secure extra`：Python 版安裝時漏了 `secure`，重裝 `[server,secure]`。
    - `找不到 …keys.json；請先執行 llmop worker init`：先做 `llmop worker init`。
    - worker 的 `base_url` 只能是本機（`127.0.0.1`、`localhost`），不然 worker 拒絕啟動。
+   - 之後 `llmop serve` 印出 `WARNING: worker not started (ConfigError); run once:  llmop worker init`，而 `config.json` 明明在：
+     代表 **`config.json` 寫壞了**（例如少了逗號、括號，或 `kind` 打錯），不是要重新 init——`llmop worker init` 看到檔案已經存在就**不會改它**
+     （會印 `設定檔 …config.json 已存在，沒有變更。`）。打開檔案，對照上面「改完的整個檔案」修正，再重開 `llmop serve`。
 
 ### 步驟 A8：啟動伺服器並打開通道
 
 1. **做什麼**：啟動整個服務，並開兩條通道（帳號網站、API 連結）。**這個視窗要一直開著**，關掉就停止分享。
 2. **打什麼**：
 
-   ```powershell
+   ```
    llmop serve --tunnel --open
    ```
 
@@ -343,7 +410,7 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 1. **做什麼**：開**第二個視窗**（Python 版：新開 PowerShell、`cd $HOME\llmop-server`、啟用虛擬環境；免安裝版：再雙擊一次 `Command-Prompt.bat`），印出完整連結。
 2. **打什麼**：
 
-   ```powershell
+   ```
    llmop tunnel show-api
    ```
 
@@ -376,15 +443,15 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
 1. **做什麼**：在 `llmop serve` 跑著的時候，用第二個視窗檢查「不該被外面連到的東西，真的連不到」。
 2. **打什麼**（一次一行，每行跑完再打下一行）：
 
-   ```powershell
+   ```
    llmop audit exposure
    ```
 
-   ```powershell
+   ```
    llmop audit exposure --public
    ```
 
-   ```powershell
+   ```
    llmop audit exposure --with-key
    ```
 
@@ -416,19 +483,19 @@ LocalLLMOutsiderProvider（指令叫 `llmop`）有兩種人會用：
    - **停止分享**：在 `llmop serve` 的視窗按 `Ctrl+C`（或直接關掉視窗）。
    - **看有哪些 key**：
 
-     ```powershell
+     ```
      llmop keys
      ```
 
    - **撤銷一把 key**（`<ID>` 換成上一行列出來的 id）：
 
-     ```powershell
+     ```
      llmop revoke-key <ID>
      ```
 
    - **API 連結外流了，換一條**（key 不用換）：
 
-     ```powershell
+     ```
      llmop tunnel rotate-api
      ```
 

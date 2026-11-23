@@ -179,8 +179,10 @@ llmop tunnel rotate-api --change-host --grace 600
 別的程式（例如 agent、聊天工具）要用這台伺服器時，裝 SDK 就好，不用裝伺服器的套件：
 
 ```bash
-pip install "localllm-outsider-provider[sdk]"
+pip install "localllm-outsider-provider[sdk] @ https://github.com/ChouYangEn0401/LocalLLMOutsiderProvider/releases/download/v0.3.0a4/localllm_outsider_provider-0.3.0a4-py3-none-any.whl"
 ```
+
+這個套件不在 PyPI 上，所以一定要寫 GitHub Release 的 wheel 網址（只寫套件名會裝不到）。
 
 使用者先在自己的電腦用終端機建一個設定檔（密碼、key 都是提示輸入）：
 

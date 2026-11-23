@@ -9,10 +9,11 @@ SDK 只需要 `httpx` 與 `cryptography`，`import llmop.sdk` 不會載入 fasta
 ## 1. 安裝
 
 ```bash
-pip install "localllm-outsider-provider[sdk]"
+pip install "localllm-outsider-provider[sdk] @ https://github.com/ChouYangEn0401/LocalLLMOutsiderProvider/releases/download/v0.3.0a4/localllm_outsider_provider-0.3.0a4-py3-none-any.whl"
 ```
 
-從 wheel 檔安裝時寫成 `pip install "<wheel 檔>[sdk]"`。伺服器那台另外要 `[server,secure]`（見 README）。
+這個套件不在 PyPI 上，所以一定要寫 GitHub Release 的 wheel 網址（只寫套件名會裝不到）。
+從下載好的 wheel 檔安裝時寫成 `pip install "<wheel 檔>[sdk]"`。伺服器那台另外要 `[server,secure]`（見 README）。
 
 ## 2. 建立設定檔（在使用者自己的電腦、終端機）
 
