@@ -1,5 +1,7 @@
 # LocalLLMOutsiderProvider（`llmop`）v0.2
 
+第一次用？看 [docs/TUTORIAL.md](docs/TUTORIAL.md)
+
 把自己電腦上的 **Ollama / LM Studio / vLLM / llama.cpp** 分享給少數親友，透過 **Cloudflare 通道**對外，前面加上
 **帳號、API key、等級與用量、排隊**。API 跟 OpenAI 相容。只有**一個模型**：請求裡的 `model` 一律換成 `config.yaml` 設定的那一個。
 
