@@ -759,7 +759,6 @@ def _make_banner(cfg: Config, local: str, tunnel) -> list[str]:
         "",
         f"  Local     : {local}/   (this computer only)",
         f"  Login     : {local}/ui/login",
-        f"  API base  : {local}/v1",
     ]
     if cfg.server.public_url:
         rows.append(f"  Public    : {cfg.server.public_url.rstrip('/')}   (server.public_url)")

@@ -9,6 +9,7 @@
 - [ ] 2026-11-23 · v0.3 兩台電腦真機驗證（A＝有模型的伺服器、B＝用 SDK／EasyLLM 的電腦）· 照 [docs/handoff/20261123-v0.3-real-machine.md](docs/handoff/20261123-v0.3-real-machine.md) 第 2、3 節逐步做 · 每一步「成功」那行都對得上，驗證清單全勾
 - [ ] 2026-11-23 · 本機控制台「載入模型」按鈕（Ollama、LM Studio 各一次）· 管理員登入 →「LLM 後端」→ 列出模型 → 選未載入的 →「載入模型」· 出現「已載入：…（N 秒）」，再列一次時標「已載入」；vLLM 顯示「啟動時就決定模型」
 - [ ] 2026-11-23 · `llmop audit` 在真的通道上 · 有模型的那台跑 `llmop audit exposure --public --with-key` 與 `llmop audit canary --scan serve.log` · 最後一行都是 `OK`；測試 key 都已撤銷、serve.log 刪掉
+- [ ] 2026-11-23 · `llmop serve` 啟動畫面只印遮罩版 API 連結（0.3.0a4）· 有模型的那台 `llmop serve --tunnel 2>&1 | Tee-Object serve.log`，等 API 通道出現網址；另一個視窗 `llmop tunnel show-api`，把主機名後面那段秘密路徑在 serve.log 裡搜尋（`Select-String -SimpleMatch`）· 畫面上 API link 是 `https://<主機>/xxx…/v1`、下一行 `Full link : llmop tunnel show-api`、沒有本機 `/v1` 那行；秘密路徑在 serve.log 找不到；測完刪 serve.log
 
 ## 測過了
 

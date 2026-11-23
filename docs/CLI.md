@@ -54,7 +54,8 @@ llmop serve --tunnel --open    :: 開兩條 Cloudflare 快速通道（需先安�
 ```
 
 開通道需要 `cloudflared`：`winget install --id Cloudflare.cloudflared`。快速通道的網址每次啟動都會變，
-會印在視窗裡，也顯示在本機主控台（`http://127.0.0.1:8781/`）。關掉視窗即停止。
+主機名會印在視窗裡，也顯示在本機主控台（`http://127.0.0.1:8781/`）。視窗裡的 API 連結是遮罩版
+（`https://<api 主機>/k7Q…/v1`），完整連結用 `llmop tunnel show-api` 看。關掉視窗即停止。
 
 ### 1.4 新增使用者
 
@@ -284,6 +285,9 @@ llmop serve --no-tunnel --log-level debug
 - 修改 `config.yaml` 的大部分結構性設定（listeners、tunnels、roles、backends）**需重啟 `serve`**；新增帳號不用。
 - 會在 `data\`（`server.data_dir`，或環境變數 `LLMOP_DATA_DIR` 覆寫）建立資料庫、API 連結的秘密與簽章等狀態；加密模式的 worker 私鑰在 `$LLMOP_HOME\worker\`。這些都不可外流。
 - 快速通道網址每次啟動不同；想固定網址需設定具名通道／`server.public_url`（見 `config.example.yaml`）。
+- 啟動畫面印：本機主控台、帳號網站、通道的公開主機名、設定檔與資料位置、怎麼停止。API 連結只印**遮罩版**
+  （主機名＋秘密路徑前 3 個字＋`…`，例如 `https://<api 主機>/k7Q…/v1`），下一行提示 `Full link : llmop tunnel show-api`；
+  本機免金鑰 `/v1` 那一行也不印（入口照樣在）。所以把輸出存成紀錄檔（例如 `serve.log`）也不會留下秘密路徑。
 - 對應 `.bat`：`Start.bat`（`serve`）、`Start-With-Tunnel.bat`（`serve --tunnel`）。
 
 ### 3.6 `llmop tunnel`
@@ -300,7 +304,7 @@ llmop tunnel [show-api | rotate-api] [--change-host] [--grace SECONDS] [--reason
 
 | 參數 | 意義 / 預設 / 何時用 |
 |---|---|
-| `show-api` | 印出目前的 API 連結（含秘密路徑，不要貼到公開處）。 |
+| `show-api` | 印出目前的完整 API 連結（含秘密路徑，不要貼到公開處）。`llmop serve` 的啟動畫面只印遮罩版，要完整的就用這個。 |
 | `rotate-api` | 產生新的秘密 API 連結。舊連結預設立刻失效。 |
 | `--change-host` | 僅 `rotate-api`：連同通道主機名一起換（重啟 `api` 通道）。需有執行中的 `llmop serve`。 |
 | `--grace SECONDS` | 僅 `rotate-api`：舊連結再保留多少秒，預設 `0`。要讓使用者有時間改設定時用，例如 `600`。 |

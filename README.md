@@ -144,7 +144,8 @@ print(client.chat.completions.create(model="any", messages=[{"role": "user", "co
 - 通道 `ui`（帳號網站）幾乎不重啟；通道 `api`（API 連結）可以隨時換掉，兩者互不影響。
 - quick tunnel 的網址在每次啟動 cloudflared 時都會變；帳號網站的網址變了，要另外通知使用者（LINE 等）。要固定網址，在
   `tunnels.ui`／`tunnels.api` 設 `mode: named`、`token`、`public_url`。
-- 看目前的 API 連結：
+- `llmop serve` 啟動時主控台只印**遮罩過的** API 連結（主機名＋秘密路徑前 3 個字，例如 `https://<api 主機>/k7Q…/v1`），
+  也不印本機 `/v1` 那一行；主控台的輸出常被導進紀錄檔，所以完整連結不出現在那裡。看完整的 API 連結：
 
 ```bash
 llmop tunnel show-api

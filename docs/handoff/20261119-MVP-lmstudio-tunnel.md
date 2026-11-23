@@ -39,7 +39,7 @@ API 連結與帳號網站網址（會變、含秘密路徑，**不寫在文件�
 - **未做**：面板 HTTP 端點對活的服務、以及透過公開連結的 e2e——因為服務還沒用新程式碼重啟、通道沒開。瀏覽器 UI 沒實際點過（沒有 node 可檢查 JS 語法）。
 
 ## 已知問題／下一步
-1. 停掉舊 serve → `pip install -e .` → 用上面指令啟動 → 讀 `data\serve.log` 取得連結。
+1. 停掉舊 serve → `pip install -e .` → 用上面指令啟動 → 用 `llmop tunnel show-api` 取得連結（0.3.0a4 起 `serve.log` 只有遮罩版）。
 2. 建一把測試 key（`llmop` 的 key 建立路徑見 `cli.py`／控制台），用公開連結 `POST <API 連結>/v1/chat/completions` 測，之後撤銷。
 3. 面板實測：列模型 → 再啟用 `qwen3.5-9b@q6_k`。
 4. 模型選單目前會把嵌入模型（embedding）也列出來。
