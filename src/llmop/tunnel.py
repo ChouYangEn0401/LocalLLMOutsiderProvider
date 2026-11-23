@@ -522,8 +522,11 @@ class TunnelManager:
             f"      {url}",
             "",
             f"  Web login : {url}/ui/login",
-            f"  API base  : {url}/v1      (OpenAI-compatible, needs an API key)",
         ]
+        if self.name != "ui":
+            # v0.1 single listener: this host serves /v1 itself (no secret path). The
+            # node's "ui" tunnel is the account website only; its API is the API link.
+            rows.append(f"  API base  : {url}/v1      (OpenAI-compatible, needs an API key)")
         if self.mode == "quick":
             rows += [
                 "",

@@ -33,6 +33,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 from .netguard import GateState, gate_hash
 
@@ -98,6 +99,22 @@ def _read_gate(path: Path) -> str:
         return ""
     ok = 16 <= len(text) <= 128 and all(c.isalnum() or c in "-_" for c in text) and text.isascii()
     return text if ok else ""
+
+
+MASK_KEEP = 3  # characters of the gate kept by mask_api_link (enough to tell links apart)
+
+
+def mask_api_link(url: str, keep: int = MASK_KEEP) -> str:
+    """For display: ``https://<host>/<first 3 characters of the gate>…`` (everything
+    after the gate is dropped). The startup banner and other output that may end up in
+    a log file use this; only ``llmop tunnel show-api`` / ``rotate-api`` print the full
+    link, because the person asked for it."""
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    gate = parts.path.strip("/").split("/", 1)[0]
+    head = f"{parts.scheme}://{parts.netloc}" if parts.netloc else ""
+    return f"{head}/{gate[:max(0, keep)]}…" if gate else head
 
 
 def api_base_url(cfg: Any, tunnel: Any = None, store: Any = None) -> str:
@@ -220,6 +237,10 @@ class ApiLink:
         except Exception:
             base = ""
         return f"{base}/{gate}" if base else ""
+
+    def masked_url(self) -> str:
+        """:func:`mask_api_link` of :meth:`current_url` (safe to print), or ""."""
+        return mask_api_link(self.current_url())
 
     @property
     def url(self) -> str:

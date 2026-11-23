@@ -211,7 +211,8 @@ class Node:
             def on_url(_url: str) -> None:
                 link = getattr(state, "api_link", None)
                 if link is not None:
-                    self.out(f"  API link  : {link.current_url()}/v1   (and /e2e/v1)")
+                    for row in _api_link_rows(link.current_url(), "and /e2e/v1"):
+                        self.out(row)
         public = settings.public_url or (self.cfg.server.public_url if name == "ui" else "")
         return self.tunnel_factory(
             settings, self.local_url("ui" if name == "ui" else "api"), state.store,
@@ -439,11 +440,10 @@ class Node:
             link = getattr(self.state, "api_link", None)
             rows += [
                 f"  Console   : {self.local_url('local')}/   (this computer only)",
-                f"  Local API : {self.local_url('local')}/v1   (no key needed)",
                 f"  Accounts  : {self.local_url('ui')}/   (tunnel 'ui')",
             ]
-            if link is not None and link.current_url():
-                rows.append(f"  API link  : {link.current_url()}/v1   (tunnel 'api'; keep it private)")
+            if link is not None:
+                rows += _api_link_rows(link.current_url(), "tunnel 'api'; keep it private")
             for name in ("ui", "api"):
                 t = self.state.tunnels.get(name)
                 if t is not None:
@@ -497,6 +497,17 @@ class Node:
                 await state.router.aclose()
             with contextlib.suppress(Exception):
                 state.store.close()
+
+
+def _api_link_rows(url: str, note: str) -> list[str]:
+    """Banner rows for the API link: the secret path is masked (this output often ends
+    up in a log file); the full link is only printed by ``llmop tunnel show-api``."""
+    from .apilink import mask_api_link
+
+    if not url:
+        return []
+    return [f"  API link  : {mask_api_link(url)}/v1   ({note})",
+            "  Full link : llmop tunnel show-api"]
 
 
 def _print(text: str) -> None:
